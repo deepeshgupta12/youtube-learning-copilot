@@ -4,8 +4,10 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.api.jobs import router as jobs_router
 
 app = FastAPI(title="YouTube Learning Copilot API", version="0.0.1")
+app.include_router(jobs_router)
 
 
 class HealthResponse(BaseModel):
@@ -17,7 +19,6 @@ class HealthResponse(BaseModel):
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    # lightweight DB check
     db_ok = False
     try:
         db: Session = next(get_db())

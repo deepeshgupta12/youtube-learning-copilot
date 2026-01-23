@@ -17,5 +17,16 @@ services:
     ports:
       - "6379:6379"
 
+  flower:
+    image: mher/flower:2.0
+    container_name: ylc_flower
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - FLOWER_PORT=5555
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+
 volumes:
   ylc_pgdata:
