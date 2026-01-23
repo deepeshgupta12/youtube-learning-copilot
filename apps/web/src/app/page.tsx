@@ -1,43 +1,141 @@
-export default async function Home() {
-  const base = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+"use client";
 
-  let api: any = null;
-  let error: string | null = null;
+// apps/web/src/app/page.tsx
+import { useMemo, useState } from "react";
+import {
+  createStudyPackFromYoutube,
+  pollJobUntilDone,
+  type JobGetResponse,
+  type StudyPackFromYoutubeResponse,
+} from "../lib/api";
 
-  try {
-    const res = await fetch(`${base}/health`, { cache: "no-store" });
-    api = await res.json();
-  } catch (e: any) {
-    error = e?.message || "Failed to call API";
+function isLikelyYoutubeUrl(v: string): boolean {
+  const s = (v || "").trim();
+  if (!s) return false;
+  return s.includes("youtube.com/") || s.includes("youtu.be/");
+}
+
+export default function HomePage() {
+  const [url, setUrl] = useState<string>("");
+  const [language, setLanguage] = useState<string>("en");
+
+  const [creating, setCreating] = useState(false);
+  const [createResp, setCreateResp] = useState<StudyPackFromYoutubeResponse | null>(null);
+
+  const [job, setJob] = useState<JobGetResponse | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const canSubmit = useMemo(() => isLikelyYoutubeUrl(url) && !creating, [url, creating]);
+
+  async function onCreate() {
+    setErr(null);
+    setCreateResp(null);
+    setJob(null);
+
+    const u = url.trim();
+    if (!isLikelyYoutubeUrl(u)) {
+      setErr("Please enter a valid YouTube URL.");
+      return;
+    }
+
+    setCreating(true);
+    try {
+      const resp = await createStudyPackFromYoutube(u, language?.trim() || "en");
+      setCreateResp(resp);
+
+      const finalJob = await pollJobUntilDone(resp.job_id, { intervalMs: 1200, timeoutMs: 120000 });
+      setJob(finalJob);
+
+      if (finalJob.status === "failed") {
+        setErr(finalJob.error || "Job failed.");
+      }
+    } catch (e: any) {
+      setErr(e?.message || "Something went wrong.");
+    } finally {
+      setCreating(false);
+    }
   }
 
   return (
-    <main style={{ padding: 24, fontFamily: "ui-sans-serif, system-ui" }}>
-      <h1 style={{ fontSize: 24, fontWeight: 700 }}>YouTube Learning Copilot</h1>
-      <p style={{ marginTop: 8 }}>
-        Local V0 bootstrap: Web calls API health endpoint.
+    <main style={{ padding: 24, maxWidth: 860, margin: "0 auto" }}>
+      <h1 style={{ marginBottom: 6 }}>YouTube Learning Copilot</h1>
+      <p style={{ marginTop: 0, opacity: 0.75 }}>
+        Create a study pack from a YouTube video, ingest transcript, then generate study materials.
       </p>
 
-      <section style={{ marginTop: 16 }}>
-        <h2 style={{ fontSize: 18, fontWeight: 600 }}>API Status</h2>
-        {error ? (
-          <pre style={{ marginTop: 8, padding: 12, background: "#f5f5f5" }}>
-            Error: {error}
-          </pre>
-        ) : (
-          <pre style={{ marginTop: 8, padding: 12, background: "#f5f5f5" }}>
-            {JSON.stringify(api, null, 2)}
-          </pre>
-        )}
-      </section>
+      <div style={{ display: "grid", gap: 12, marginTop: 18 }}>
+        <label style={{ display: "grid", gap: 6 }}>
+          <span>YouTube URL</span>
+          <input
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="https://www.youtube.com/watch?v=..."
+            style={{ padding: 10, borderRadius: 8, border: "1px solid rgba(0,0,0,0.15)" }}
+          />
+        </label>
 
-      <section style={{ marginTop: 16 }}>
-        <h2 style={{ fontSize: 18, fontWeight: 600 }}>Next Steps</h2>
-        <ul style={{ marginTop: 8, paddingLeft: 18 }}>
-          <li>Docker: Postgres (pgvector) + Redis already scaffolded</li>
-          <li>Next: add DB models + job queue + YouTube ingestion pipeline</li>
-        </ul>
-      </section>
+        <label style={{ display: "grid", gap: 6, maxWidth: 220 }}>
+          <span>Language</span>
+          <input
+            value={language}
+            onChange={(e) => setLanguage(e.target.value)}
+            placeholder="en"
+            style={{ padding: 10, borderRadius: 8, border: "1px solid rgba(0,0,0,0.15)" }}
+          />
+        </label>
+
+        <button
+          onClick={onCreate}
+          disabled={!canSubmit}
+          style={{
+            padding: "10px 14px",
+            borderRadius: 10,
+            border: "1px solid rgba(0,0,0,0.2)",
+            cursor: canSubmit ? "pointer" : "not-allowed",
+            width: 260,
+          }}
+        >
+          {creating ? "Creating + Ingesting..." : "Create Study Pack"}
+        </button>
+
+        {err && (
+          <div style={{ padding: 12, borderRadius: 10, border: "1px solid rgba(255,0,0,0.3)" }}>
+            <strong>Error:</strong> {err}
+          </div>
+        )}
+
+        {createResp && (
+          <div style={{ padding: 12, borderRadius: 10, border: "1px solid rgba(0,0,0,0.12)" }}>
+            <div><strong>Study Pack ID:</strong> {createResp.study_pack_id}</div>
+            <div><strong>Video ID:</strong> {createResp.video_id}</div>
+            <div><strong>Job ID:</strong> {createResp.job_id}</div>
+            <div><strong>Task ID:</strong> {createResp.task_id}</div>
+          </div>
+        )}
+
+        {job && (
+          <div style={{ padding: 12, borderRadius: 10, border: "1px solid rgba(0,0,0,0.12)" }}>
+            <div><strong>Job Status:</strong> {job.status}</div>
+            {job.error && <div><strong>Job Error:</strong> {job.error}</div>}
+
+            {createResp && job.status === "done" && (
+              <a
+                href={`/packs/${createResp.study_pack_id}`}
+                style={{
+                  display: "inline-block",
+                  marginTop: 10,
+                  padding: "10px 14px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(0,0,0,0.2)",
+                  textDecoration: "none",
+                }}
+              >
+                Open Pack
+              </a>
+            )}
+          </div>
+        )}
+      </div>
     </main>
   );
 }
