@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ylc_postgres
+    environment:
+      POSTGRES_USER: ylc
+      POSTGRES_PASSWORD: ylc
+      POSTGRES_DB: ylc
+    ports:
+      - "5433:5432"
+    volumes:
+      - ylc_pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: ylc_redis
+    ports:
+      - "6379:6379"
+
+volumes:
+  ylc_pgdata:
