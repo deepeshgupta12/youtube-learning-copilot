@@ -19,3 +19,15 @@ def run_sample_pipeline(job_id: int, sleep_sec: int = 2) -> dict:
         raise
     finally:
         db.close()
+
+
+# --------------------------------------------------------------------------------------
+# IMPORTANT:
+# Celery autodiscover only imports "app.worker.tasks" by default.
+# Your other tasks live in separate modules (generate_tasks.py, ingest_tasks.py),
+# so we import them here to ensure they get registered with Celery.
+# --------------------------------------------------------------------------------------
+
+# noqa imports are intentional (they register @celery_app.task decorators)
+from app.worker.generate_tasks import generate_study_materials  # noqa: F401,E402
+from app.worker.ingest_tasks import ingest_youtube_captions  # noqa: F401,E402
