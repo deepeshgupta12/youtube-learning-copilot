@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
 from app.services.jobs import set_job_status
 from app.services.study_packs import set_ingested, set_failed
-from app.services.transcript import fetch_youtube_transcript, TranscriptNotFound
+import app.services.transcript as transcript
 from app.worker.celery_app import celery_app
 
 
@@ -13,7 +13,7 @@ def ingest_youtube_captions(job_id: int, study_pack_id: int, video_id: str, lang
     try:
         set_job_status(db, job_id, "running")
 
-        t = fetch_youtube_transcript(video_id, language=language)
+        t = transcript.fetch_youtube_transcript(video_id, language=language)
 
         # minimal meta for V0
         meta = {"video_id": video_id, "provider": "youtube", "captions": True}
@@ -30,7 +30,7 @@ def ingest_youtube_captions(job_id: int, study_pack_id: int, video_id: str, lang
 
         set_job_status(db, job_id, "done")
         return {"ok": True, "study_pack_id": study_pack_id, "job_id": job_id}
-    except TranscriptNotFound as e:
+    except transcript.TranscriptNotFound as e:
         set_failed(db, study_pack_id, str(e))
         set_job_status(db, job_id, "failed", error=str(e))
         raise
