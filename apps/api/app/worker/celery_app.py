@@ -32,6 +32,12 @@ celery_app.conf.update(
     timezone="UTC",
 )
 
+if os.getenv("ENV") == "test":
+    celery_app.conf.update(
+        task_always_eager=True,
+        task_eager_propagates=True,
+    )
+
 # Helpful startup log (shows up in worker terminal)
 celery_app.log.setup()
 celery_app.log.get_default_logger().info(
