@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import relationship
 
-from app.db.base import Base
+from app.db.base_class import Base
 
 
 class StudyMaterial(Base):
