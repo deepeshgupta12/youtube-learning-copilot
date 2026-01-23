@@ -6,10 +6,12 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.api.jobs import router as jobs_router
 from app.api.study_packs import router as study_packs_router
+from app.api.study_materials import router as study_materials_router
 
 app = FastAPI(title="YouTube Learning Copilot API", version="0.0.1")
 app.include_router(jobs_router)
 app.include_router(study_packs_router)
+app.include_router(study_materials_router)
 
 
 class HealthResponse(BaseModel):
