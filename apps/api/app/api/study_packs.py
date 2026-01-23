@@ -1,9 +1,9 @@
-from apps.api.app.models.study_pack import StudyPack
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.models.study_pack import StudyPack
 from app.services.jobs import create_job
 from app.services.study_packs import create_study_pack
 from app.services.youtube import extract_youtube_video_id
@@ -26,7 +26,9 @@ class StudyPackFromYoutubeResponse(BaseModel):
 
 
 @router.post("/from-youtube", response_model=StudyPackFromYoutubeResponse)
-def create_from_youtube(req: StudyPackFromYoutubeRequest, db: Session = Depends(get_db)) -> StudyPackFromYoutubeResponse:
+def create_from_youtube(
+    req: StudyPackFromYoutubeRequest, db: Session = Depends(get_db)
+) -> StudyPackFromYoutubeResponse:
     video_id = extract_youtube_video_id(req.url)
     if not video_id:
         raise HTTPException(status_code=400, detail="Invalid YouTube URL")
@@ -51,7 +53,8 @@ def create_from_youtube(req: StudyPackFromYoutubeRequest, db: Session = Depends(
         video_id=video_id,
     )
 
-@router.get("/study-packs/{study_pack_id}")
+
+@router.get("/{study_pack_id}")
 def get_study_pack(study_pack_id: int, db: Session = Depends(get_db)):
     sp = db.query(StudyPack).filter(StudyPack.id == study_pack_id).first()
     if not sp:
