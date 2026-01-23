@@ -28,3 +28,8 @@ pnpm-debug.log*
 
 # Docker
 *.log
+
+infra/youtube_cookies.txt
+
+# YouTube cookies
+infra/youtube_cookies.txt
