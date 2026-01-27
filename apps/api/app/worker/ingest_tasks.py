@@ -1,138 +1,132 @@
+# apps/api/app/worker/ingest_tasks.py
 from __future__ import annotations
 
-import os
+from typing import Any
+
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
 from app.models.study_pack import StudyPack
+from app.models.transcript_chunk import TranscriptChunk
 from app.services.jobs import set_job_status
 from app.services.study_packs import set_ingested, set_failed
 import app.services.transcript as transcript
 from app.worker.celery_app import celery_app
 
-# V1.1: STT fallback + chunk store
-from app.core.youtube_settings import youtube_settings
-from app.services.youtube_audio import download_youtube_audio, AudioDownloadError
-from app.services.audio_utils import normalize_to_wav_16k_mono, AudioNormalizeError
-from app.services.stt import transcribe_faster_whisper, STTError
-from app.services.transcript_chunks import segments_to_chunks, replace_chunks
 
-
-def _ingest_one_video_with_fallback(
-    db: Session,
-    *,
-    study_pack_id: int,
-    video_id: str,
-    language: str | None,
-    base_meta: dict | None = None,
-    title: str | None = None,
-) -> None:
+def _segments_to_chunks(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
-    Captions-first ingestion; if captions missing, fallback to:
-      yt-dlp audio -> ffmpeg normalize -> faster-whisper STT
+    Normalize transcript segments into canonical chunk rows:
+      {idx, start_sec, end_sec, text}
 
-    Always:
-      - set_ingested(...)
-      - write transcript_chunks rows for citations/jump-to-time
+    Supports segments that look like:
+      - youtube_transcript_api: {text, start, duration}
+      - our vtt parser:         {text, start, duration}
+      - STT:                    {text, start, duration}
     """
-    provider = "youtube"
-    captions_used = True
-    stt_used = False
-    stt_model = None
+    chunks: list[dict[str, Any]] = []
+    idx = 0
 
-    t = None
+    for seg in segments or []:
+        txt = (seg.get("text") or "").strip()
+        if not txt:
+            continue
 
-    # 1) Captions-first
-    try:
-        t = transcript.fetch_youtube_transcript(video_id, language=language)
-    except transcript.TranscriptNotFound:
-        # 2) STT fallback
-        captions_used = False
-        stt_used = True
-        provider = "stt"
+        start = float(seg.get("start") or 0.0)
+        duration = float(seg.get("duration") or 0.0)
+        end = float(max(start, start + max(0.0, duration)))
 
-        model_size = os.getenv("STT_MODEL_SIZE", "small")
-        compute_type = os.getenv("STT_COMPUTE_TYPE", "int8")
-        stt_model = f"faster-whisper:{model_size}:{compute_type}"
+        chunks.append(
+            {
+                "idx": idx,
+                "start_sec": start,
+                "end_sec": end,
+                "text": txt,
+            }
+        )
+        idx += 1
 
-        audio_path = None
-        wav_path = None
-        try:
-            audio_path = download_youtube_audio(
-                video_id,
-                cookies_file=youtube_settings.cookies_file,
-                proxy_url=youtube_settings.proxy_url,
-            )
-            wav_path = normalize_to_wav_16k_mono(audio_path)
-            t = transcribe_faster_whisper(
-                wav_path,
-                language=language,
-                model_size=model_size,
-                compute_type=compute_type,
-            )
-        except (AudioDownloadError, AudioNormalizeError, STTError) as e:
-            # bubble up as TranscriptNotFound so existing error handling stays consistent
-            raise transcript.TranscriptNotFound(str(e)) from e
-        finally:
-            # cleanup tempdirs created in helpers
-            if wav_path is not None and hasattr(wav_path, "_tmp"):
-                try:
-                    wav_path._tmp.cleanup()  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-            if audio_path is not None and hasattr(audio_path, "_tmp"):
-                try:
-                    audio_path._tmp.cleanup()  # type: ignore[attr-defined]
-                except Exception:
-                    pass
+    return chunks
 
-    meta = {
-        **(base_meta or {}),
-        "video_id": video_id,
-        "provider": provider,
-        "captions": captions_used,
-        "stt": stt_used,
-        "stt_model": stt_model,
-    }
 
-    # Persist transcript on study_packs
-    set_ingested(
-        db,
-        study_pack_id,
-        title=title,
-        meta=meta,
-        transcript_segments=t["segments"],
-        transcript_text=t["text"],
-        language=t.get("language") or language,
-    )
+def _replace_transcript_chunks(db: Session, study_pack_id: int, chunks: list[dict[str, Any]]) -> int:
+    """
+    Replace all chunks for a pack (idempotent).
+    """
+    db.query(TranscriptChunk).filter(TranscriptChunk.study_pack_id == study_pack_id).delete()
 
-    # Persist timestamped chunks on transcript_chunks
-    chunks = segments_to_chunks(t["segments"])
-    replace_chunks(db, study_pack_id, chunks)
+    if not chunks:
+        db.commit()
+        return 0
+
+    rows = [
+        TranscriptChunk(
+            study_pack_id=study_pack_id,
+            idx=c["idx"],
+            start_sec=c["start_sec"],
+            end_sec=c["end_sec"],
+            text=c["text"],
+        )
+        for c in chunks
+    ]
+    db.bulk_save_objects(rows)
+    db.commit()
+    return len(rows)
 
 
 @celery_app.task(name="ingest.youtube_captions")
-def ingest_youtube_captions(
-    job_id: int,
-    study_pack_id: int,
-    video_id: str,
-    language: str | None = None,
-) -> dict:
+def ingest_youtube_captions(job_id: int, study_pack_id: int, video_id: str, language: str | None = None) -> dict:
+    """
+    V1 ingestion (single video):
+      - captions-first
+      - yt-dlp subs fallback
+      - STT fallback (audio+ffmpeg+faster-whisper)
+      - always stores timestamped transcript_json
+      - always writes transcript_chunks
+    """
     db: Session = SessionLocal()
     try:
         set_job_status(db, job_id, "running")
 
-        _ingest_one_video_with_fallback(
+        t = transcript.fetch_youtube_transcript(video_id, language=language)
+
+        # method: captions | ytdlp_subs | stt
+        method = t.get("method") or "unknown"
+        segments = t["segments"]
+        text = t["text"]
+
+        chunks = _segments_to_chunks(segments)
+        chunks_written = _replace_transcript_chunks(db, study_pack_id, chunks)
+
+        meta = {
+            "video_id": video_id,
+            "provider": "youtube",
+            "method": method,
+            "captions": method == "captions",
+            "ytdlp_subs": method == "ytdlp_subs",
+            "stt": method == "stt",
+            "chunks_written": chunks_written,
+        }
+
+        set_ingested(
             db,
-            study_pack_id=study_pack_id,
-            video_id=video_id,
-            language=language,
-            base_meta=None,
+            study_pack_id,
             title=None,
+            meta=meta,
+            transcript_segments=segments,  # IMPORTANT: store timestamp segments (not plain text)
+            transcript_text=text,
+            language=t.get("language") or language,
         )
 
         set_job_status(db, job_id, "done")
-        return {"ok": True, "study_pack_id": study_pack_id, "job_id": job_id}
+        return {
+            "ok": True,
+            "study_pack_id": study_pack_id,
+            "job_id": job_id,
+            "method": method,
+            "chunks_written": chunks_written,
+        }
+
     except transcript.TranscriptNotFound as e:
         set_failed(db, study_pack_id, str(e))
         set_job_status(db, job_id, "failed", error=str(e))
@@ -154,13 +148,13 @@ def ingest_youtube_playlist(
 ) -> dict:
     """
     V1 playlist ingestion:
-    - study_pack rows are created in API (so we have ids immediately)
-    - worker ingests captions sequentially for each pack
-    - captions-first, STT fallback per video
-    - always stores transcript_chunks (timestamps)
+      - study_pack rows are created in API (so we have ids immediately)
+      - worker ingests each pack sequentially
+      - Private/Deleted videos are expected to fail; job should still be "done"
+      - Job payload_json should carry summary (ingested/failed + failures list)
     """
     db: Session = SessionLocal()
-    failed: list[dict] = []
+    failed: list[dict[str, Any]] = []
     done: int = 0
 
     try:
@@ -172,7 +166,7 @@ def ingest_youtube_playlist(
                 failed.append({"study_pack_id": sp_id, "error": "StudyPack not found"})
                 continue
 
-            # Fail-fast: yt-dlp marks these as [Private video] / [Deleted video]
+            # Skip fast-known invalids based on title assigned during playlist discovery
             if (sp.title or "").strip().lower() in ["[private video]", "[deleted video]"]:
                 msg = f"{sp.title} (skipped)"
                 set_failed(db, sp_id, msg)
@@ -187,13 +181,33 @@ def ingest_youtube_playlist(
                 continue
 
             try:
-                _ingest_one_video_with_fallback(
+                t = transcript.fetch_youtube_transcript(video_id, language=language)
+                method = t.get("method") or "unknown"
+                segments = t["segments"]
+                text = t["text"]
+
+                chunks = _segments_to_chunks(segments)
+                chunks_written = _replace_transcript_chunks(db, sp_id, chunks)
+
+                meta = {
+                    "video_id": video_id,
+                    "provider": "youtube",
+                    "playlist_id": playlist_id,
+                    "method": method,
+                    "captions": method == "captions",
+                    "ytdlp_subs": method == "ytdlp_subs",
+                    "stt": method == "stt",
+                    "chunks_written": chunks_written,
+                }
+
+                set_ingested(
                     db,
-                    study_pack_id=sp_id,
-                    video_id=video_id,
-                    language=language,
-                    base_meta={"playlist_id": playlist_id},
+                    sp_id,
                     title=sp.title,
+                    meta=meta,
+                    transcript_segments=segments,
+                    transcript_text=text,
+                    language=t.get("language") or language,
                 )
                 done += 1
             except transcript.TranscriptNotFound as e:
@@ -203,21 +217,22 @@ def ingest_youtube_playlist(
                 set_failed(db, sp_id, str(e))
                 failed.append({"study_pack_id": sp_id, "error": str(e)})
 
-        # Terminalize job as DONE always; store summary in error field if needed
-        summary = f"playlist ingestion finished: total={len(study_pack_ids)}, ingested={done}, failed={len(failed)}"
-        if failed:
-            set_job_status(db, job_id, "done", error=summary)
-        else:
-            set_job_status(db, job_id, "done", error=None)
-
-        return {
-            "ok": True,  # job completed (not “all succeeded”)
-            "job_id": job_id,
+        summary = {
             "playlist_id": playlist_id,
             "total": len(study_pack_ids),
             "ingested": done,
             "failed_count": len(failed),
-            "failed": failed,
+            "failed": failed[:200],  # cap to avoid huge job payloads
         }
+
+        # IMPORTANT: job is "done" even if partial failures
+        msg = None
+        if failed:
+            msg = f"done_with_errors: failed={len(failed)}/{len(study_pack_ids)}"
+
+        set_job_status(db, job_id, "done", error=msg, payload=summary)
+
+        return {"ok": True, "job_id": job_id, **summary}
+
     finally:
         db.close()

@@ -41,6 +41,11 @@ export type StudyPackResponse = {
     error: string | null;
     created_at: string | null;
     updated_at: string | null;
+
+    // ✅ include playlist fields (backend already returns these)
+    playlist_id?: string | null;
+    playlist_title?: string | null;
+    playlist_index?: number | null;
   };
 };
 
@@ -68,6 +73,33 @@ export type GenerateMaterialsResponse = {
   task_id: string;
 };
 
+/** ✅ V1 Minimal Library types */
+export type StudyPackListItem = {
+  id: number;
+  title: string | null;
+  source_type: string;
+  source_url: string;
+  status: string;
+  source_id: string | null;
+  language: string | null;
+
+  playlist_id: string | null;
+  playlist_title: string | null;
+  playlist_index: number | null;
+
+  error: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type StudyPackListResponse = {
+  ok: boolean;
+  total: number;
+  limit: number;
+  offset: number;
+  packs: StudyPackListItem[];
+};
+
 function baseUrl(): string {
   const v = process.env.NEXT_PUBLIC_API_BASE_URL;
   return v && v.trim() ? v.trim().replace(/\/+$/, "") : "http://localhost:8000";
@@ -92,7 +124,6 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   };
 
   if (hasBody) {
-    // If caller passes string body, assume it's JSON string unless they overrode.
     if (!headers["Content-Type"]) headers["Content-Type"] = "application/json";
   }
 
@@ -103,14 +134,12 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     cache: "no-store",
   });
 
-  // Some endpoints might return empty body (204 etc.)
   const raw = await res.text();
 
   let data: any = null;
   try {
     data = raw ? JSON.parse(raw) : null;
   } catch {
-    // Non-JSON response fallback
     data = { ok: false, error: raw || `Non-JSON response from ${url}` };
   }
 
@@ -128,8 +157,6 @@ export async function createStudyPackFromYoutube(
   url: string,
   language?: string | null
 ): Promise<StudyPackFromYoutubeResponse> {
-  // This WILL still trigger preflight because it's JSON POST (normal).
-  // Backend must allow OPTIONS via CORS middleware.
   return apiFetch<StudyPackFromYoutubeResponse>("/study-packs/from-youtube", {
     method: "POST",
     body: JSON.stringify({ url, language: language || null }),
@@ -145,7 +172,6 @@ export async function getStudyPack(studyPackId: number): Promise<StudyPackRespon
 }
 
 export async function generateMaterials(studyPackId: number): Promise<GenerateMaterialsResponse> {
-  // Keep POST with no body => no Content-Type header => avoids preflight
   return apiFetch<GenerateMaterialsResponse>(`/study-packs/${studyPackId}/generate`, {
     method: "POST",
   });
@@ -153,8 +179,26 @@ export async function generateMaterials(studyPackId: number): Promise<GenerateMa
 
 export async function getMaterials(studyPackId: number): Promise<StudyMaterialsResponse> {
   return apiFetch<StudyMaterialsResponse>(`/study-packs/${studyPackId}/materials`, {
-    method: "GET",
-  });
+    method: "GET" });
+}
+
+/** ✅ V1 Minimal Library call */
+export async function listStudyPacks(params?: {
+  q?: string;
+  status?: string;
+  source_type?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<StudyPackListResponse> {
+  const qs = new URLSearchParams();
+  if (params?.q) qs.set("q", params.q);
+  if (params?.status) qs.set("status", params.status);
+  if (params?.source_type) qs.set("source_type", params.source_type);
+  if (params?.limit !== undefined) qs.set("limit", String(params.limit));
+  if (params?.offset !== undefined) qs.set("offset", String(params.offset));
+
+  const path = `/study-packs${qs.toString() ? `?${qs.toString()}` : ""}`;
+  return apiFetch<StudyPackListResponse>(path, { method: "GET" });
 }
 
 /**
