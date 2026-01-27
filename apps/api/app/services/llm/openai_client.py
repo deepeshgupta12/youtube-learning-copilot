@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any
-
-from openai import OpenAI
+import time
+from typing import Any, Dict, Tuple
 
 from app.services.llm.prompts import STUDY_MATERIALS_SYSTEM, STUDY_MATERIALS_USER_TEMPLATE
 
+
+# ----------------------------
+# Transcript compression helpers
+# ----------------------------
 
 _STAGE_DIR_RE = re.compile(
     r"""\[
@@ -18,177 +21,212 @@ _STAGE_DIR_RE = re.compile(
 )
 
 
-def _dedupe_consecutive_ngrams(words: list[str], n: int) -> list[str]:
-    if n <= 1 or len(words) < n * 2:
-        return words
-    out: list[str] = []
-    i = 0
-    while i < len(words):
-        if len(out) >= n and i + n <= len(words) and out[-n:] == words[i : i + n]:
-            i += n
-            continue
-        out.append(words[i])
-        i += 1
-    return out
-
-
 def _clean_text(text: str) -> str:
     s = (text or "").strip()
     if not s:
         return ""
     s = _STAGE_DIR_RE.sub(" ", s)
     s = re.sub(r"\s+", " ", s).strip()
-
-    words = s.split()
-    # stronger than heuristic path because caption noise is brutal
-    for n in (14, 12, 10, 8, 6):
-        words = _dedupe_consecutive_ngrams(words, n)
-    s = " ".join(words)
-    s = re.sub(r"\s+", " ", s).strip()
     return s
 
 
-def _compress_for_llm(text: str, max_words: int = 2200) -> str:
-    """
-    Keep coverage across the transcript: take head + middle + tail.
-    Prevents huge dumps that encourage the model to copy.
-    """
+def _chunk_words(text: str, chunk_words: int = 28) -> list[str]:
     words = [w for w in (text or "").split() if w]
     if not words:
+        return []
+    return [" ".join(words[i : i + chunk_words]).strip() for i in range(0, len(words), chunk_words)]
+
+
+def _simple_sentence_split(text: str) -> list[str]:
+    text = _clean_text(text)
+    if not text:
+        return []
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    parts = [p.strip() for p in parts if p.strip()]
+    if len(parts) < 6:
+        parts = _chunk_words(text, chunk_words=28)
+    parts = [p for p in parts if len(p.split()) >= 6]
+    return parts
+
+
+def _pick_evenly(items: list[str], k: int) -> list[str]:
+    if not items or k <= 0:
+        return []
+    if len(items) <= k:
+        return items
+    idxs = [round(i * (len(items) - 1) / (k - 1)) for i in range(k)]
+    out: list[str] = []
+    seen = set()
+    for ix in idxs:
+        s = items[int(ix)]
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out[:k]
+
+
+def _compress_transcript(transcript_text: str, max_chars: int = 9000) -> str:
+    """
+    Compress transcript by selecting evenly-spaced sentence-like lines.
+    This dramatically reduces timeouts while still covering the full video.
+    """
+    t = _clean_text(transcript_text)
+    if not t:
         return ""
+    if len(t) <= max_chars:
+        return t
 
-    if len(words) <= max_words:
-        return " ".join(words)
+    sents = _simple_sentence_split(t)
+    if not sents:
+        return t[:max_chars]
 
-    third = max_words // 3
-    head = words[:third]
-    tail = words[-third:]
-    mid_start = max(0, (len(words) // 2) - (third // 2))
-    mid = words[mid_start : mid_start + third]
+    # Pick enough lines to reach ~max_chars
+    # (start with 50; adjust down if still too large)
+    k = 60 if len(sents) > 200 else 45
+    picks = _pick_evenly(sents, k=k)
+    out = " ".join(picks).strip()
 
-    return (
-        "HEAD:\n" + " ".join(head) +
-        "\n\nMIDDLE:\n" + " ".join(mid) +
-        "\n\nTAIL:\n" + " ".join(tail)
-    )
-
-
-def _must_have_keys(payload: dict[str, Any]) -> None:
-    required = {"summary", "key_takeaways", "chapters", "flashcards", "quiz"}
-    missing = [k for k in required if k not in payload]
-    if missing:
-        raise ValueError(f"OpenAI payload missing keys: {missing}")
+    if len(out) > max_chars:
+        out = out[:max_chars].rsplit(" ", 1)[0].strip()
+    return out
 
 
-def _looks_like_transcript_dump(transcript: str, candidate: str) -> bool:
-    """
-    Detect if candidate is basically copied transcript.
-    Heuristic: any 13-word window in candidate appears in transcript.
-    """
-    t = (transcript or "").lower()
-    c = (candidate or "").lower()
-    if len(c.split()) < 40:
-        return False
+# ----------------------------
+# OpenAI call helpers (SDK compatible)
+# ----------------------------
 
-    c_words = c.split()
-    if len(c_words) < 13:
-        return False
-
-    for i in range(0, min(len(c_words) - 13, 120)):  # cap checks
-        window = " ".join(c_words[i : i + 13])
-        if window and window in t:
-            return True
-    return False
-
-
-def _payload_quality_check(transcript_clean: str, payload: dict[str, Any]) -> list[str]:
-    """
-    Returns list of quality issues (empty => good).
-    """
-    issues: list[str] = []
-    _must_have_keys(payload)
-
-    summary = ((payload.get("summary") or {}).get("text") or "").strip()
-    if not summary or len(summary.split()) < 60:
-        issues.append("summary too short or empty")
-    if _looks_like_transcript_dump(transcript_clean, summary):
-        issues.append("summary looks like transcript dump")
-
-    takeaways = ((payload.get("key_takeaways") or {}).get("items") or [])
-    if not isinstance(takeaways, list) or len(takeaways) < 5:
-        issues.append("key_takeaways missing or too few")
-    else:
-        # if any takeaway is huge, it's probably copy
-        for t in takeaways[:10]:
-            if isinstance(t, str) and len(t.split()) > 22:
-                issues.append("takeaway too long (likely copied)")
-                break
-
-    return issues
-
-
-def _call_openai_json(model: str, system: str, user: str) -> dict[str, Any]:
+def _build_openai_client():
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("OPENAI_API_KEY is missing")
 
-    client = OpenAI(api_key=api_key)
+    timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", "180"))
+    max_retries = int(os.getenv("OPENAI_MAX_RETRIES", "2"))
 
-    resp = client.responses.create(
-        model=model,
-        input=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        response_format={"type": "json_object"},
-        temperature=float(os.getenv("OPENAI_TEMPERATURE", "0.4")),
-        max_output_tokens=int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "1600")),
-    )
+    # OpenAI SDK v1+
+    from openai import OpenAI  # type: ignore
 
-    text = resp.output_text or ""
+    return OpenAI(api_key=api_key, timeout=timeout_sec, max_retries=max_retries)
+
+
+def _extract_json(text: str) -> dict[str, Any]:
+    """
+    Best-effort JSON extraction if model returns extra text.
+    """
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("Empty response from OpenAI")
+
+    # Fast path
     try:
-        data = json.loads(text)
-    except Exception as e:
-        raise ValueError(f"OpenAI returned non-JSON: {e}. First 200 chars: {text[:200]!r}")
-    if not isinstance(data, dict):
-        raise ValueError("OpenAI JSON root must be an object")
-    return data
+        return json.loads(text)
+    except Exception:
+        pass
 
+    # Try to find outermost JSON object
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        candidate = text[start : end + 1]
+        return json.loads(candidate)
+
+    raise ValueError(f"OpenAI returned non-JSON. First 200 chars: {text[:200]!r}")
+
+
+def _call_openai_json(client, model: str, transcript_compressed: str) -> Tuple[dict[str, Any], str]:
+    """
+    Tries Responses API first; falls back to ChatCompletions if needed.
+    Returns (payload_dict, raw_text_used_for_parsing).
+    """
+    user_prompt = STUDY_MATERIALS_USER_TEMPLATE.format(transcript=transcript_compressed)
+
+    # Attempt 1: Responses API (newer pattern)
+    try:
+        resp = client.responses.create(
+            model=model,
+            input=[
+                {"role": "system", "content": STUDY_MATERIALS_SYSTEM},
+                {"role": "user", "content": user_prompt},
+            ],
+            # Some SDK/model combos accept this; if not, we fall back.
+            response_format={"type": "json_object"},
+        )
+        raw_text = getattr(resp, "output_text", None) or ""
+        payload = _extract_json(raw_text)
+        return payload, raw_text
+    except TypeError:
+        # SDK doesn’t support response_format for Responses API
+        pass
+    except Exception:
+        # Any other error -> fall through to chat API attempt
+        pass
+
+    # Attempt 2: ChatCompletions API (widely supported)
+    try:
+        chat = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": STUDY_MATERIALS_SYSTEM},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={"type": "json_object"},
+        )
+        raw_text = (chat.choices[0].message.content or "").strip()
+        payload = _extract_json(raw_text)
+        return payload, raw_text
+    except TypeError:
+        # Older SDK may not support response_format here either -> do prompt-only JSON
+        chat = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": STUDY_MATERIALS_SYSTEM},
+                {"role": "user", "content": user_prompt + "\n\nReturn ONLY valid JSON."},
+            ],
+        )
+        raw_text = (chat.choices[0].message.content or "").strip()
+        payload = _extract_json(raw_text)
+        return payload, raw_text
+
+
+# ----------------------------
+# Public API
+# ----------------------------
 
 def generate_study_materials_openai(transcript_text: str) -> dict[str, Any]:
     """
-    OpenAI-backed generation. Returns payload schema:
-    summary, key_takeaways, chapters, flashcards, quiz
+    Returns payload:
+    {
+      "summary": {...},
+      "key_takeaways": {...},
+      "chapters": {...},
+      "flashcards": {...},
+      "quiz": {...}
+    }
     """
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-    clean = _clean_text(transcript_text)
-    compressed = _compress_for_llm(clean, max_words=int(os.getenv("OPENAI_TRANSCRIPT_MAX_WORDS", "2200")))
+    transcript_compressed = _compress_transcript(
+        transcript_text,
+        max_chars=int(os.getenv("OPENAI_TRANSCRIPT_MAX_CHARS", "9000")),
+    )
 
-    user_prompt = STUDY_MATERIALS_USER_TEMPLATE.format(transcript=compressed)
+    client = _build_openai_client()
 
-    payload = _call_openai_json(model, STUDY_MATERIALS_SYSTEM, user_prompt)
+    # Extra backoff loop on timeouts / transient failures
+    # (OpenAI SDK already retries, but this helps in Celery/network hiccups)
+    attempts = int(os.getenv("OPENAI_ATTEMPTS", "2"))
+    last_err: Exception | None = None
 
-    issues = _payload_quality_check(clean, payload)
-    if not issues:
-        return payload
+    for i in range(attempts):
+        try:
+            payload, _raw = _call_openai_json(client, model=model, transcript_compressed=transcript_compressed)
+            return payload
+        except Exception as e:
+            last_err = e
+            # backoff
+            if i < attempts - 1:
+                time.sleep(1.5 * (2 ** i))
+                continue
 
-    # One repair attempt (very effective when the model starts copying)
-    repair_user = f"""The JSON you returned has quality issues:
-- {chr(10).join(issues)}
-
-Fix the JSON while keeping the same schema.
-Remember: never copy >12 consecutive words from the transcript; paraphrase and abstract.
-
-Transcript (cleaned + compressed):
-{compressed}
-
-Return corrected JSON only."""
-    repaired = _call_openai_json(model, STUDY_MATERIALS_SYSTEM, repair_user)
-
-    # Final validation (if still bad, raise so job fails loudly instead of storing junk)
-    issues2 = _payload_quality_check(clean, repaired)
-    if issues2:
-        raise ValueError(f"OpenAI output failed quality gate: {issues2}")
-
-    return repaired
+    raise RuntimeError(f"OpenAI generation failed after {attempts} attempts: {last_err}")

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -83,6 +82,10 @@ def material_text(kind: str, payload: dict) -> str | None:
     return None
 
 
+# ----------------------------
+# Cleaning helpers
+# ----------------------------
+
 _STAGE_DIR_RE = re.compile(
     r"""\[
         (?:\s*music\s*|\s*laughter\s*|\s*applause\s*|\s*inaudible\s*|\s*silence\s*|[^\]]{1,40})
@@ -133,7 +136,7 @@ def _chunk_words(text: str, chunk_words: int = 28) -> list[str]:
 
 
 def _simple_sentence_split(text: str) -> list[str]:
-    """Make a 'sentence-like' list from transcript, even if punctuation is missing."""
+    """Make a 'sentence-like' list from transcript."""
     text = _clean_text(text)
     if not text:
         return []
@@ -170,7 +173,7 @@ def _pick_evenly(items: list[str], k: int) -> list[str]:
 # ----------------------------
 
 def generate_materials_payload_heuristic(transcript_text: str) -> dict[str, Any]:
-    """Deterministic generator that produces *distinct* materials even for no-punct transcripts."""
+    """Deterministic generator that produces distinct materials even for no-punct transcripts."""
     text = _clean_text(transcript_text)
     sents = _simple_sentence_split(text)
 
@@ -234,7 +237,7 @@ def generate_materials_payload_heuristic(transcript_text: str) -> dict[str, Any]
 
 
 # ----------------------------
-# Validation (lightweight)
+# Validation
 # ----------------------------
 
 def _overlap_ratio(a: str, b: str) -> float:
@@ -251,7 +254,12 @@ def _overlap_ratio(a: str, b: str) -> float:
     return len(a_tokens & b_tokens) / max(1, len(a_tokens))
 
 
-def validate_payload(transcript_text: str, payload: dict[str, Any], *, provider: str) -> dict[str, str]:
+def validate_payload(
+    transcript_text: str,
+    payload: dict[str, Any],
+    *,
+    provider: str = "heuristic",
+) -> dict[str, str]:
     """Returns {kind: error_code}. Empty dict = pass."""
     errors: dict[str, str] = {}
 
@@ -261,11 +269,11 @@ def validate_payload(transcript_text: str, payload: dict[str, Any], *, provider:
     summary_text = (payload.get("summary") or {}).get("text") or ""
     summary_text = _clean_text(summary_text)
 
-    # only enforce synthesized checks for openai outputs
+    # Only enforce synthesized constraints for OpenAI output (heuristic is extractive by design)
     if provider == "openai" and tlen > 600:
         if len(summary_text) > 1200:
             errors["summary"] = "summary_too_long"
-        elif _overlap_ratio(summary_text, transcript) > 0.75:
+        elif _overlap_ratio(summary_text, transcript) > 0.70:
             errors["summary"] = "summary_not_synthesized"
 
     takeaways = ((payload.get("key_takeaways") or {}).get("items") or [])
@@ -288,19 +296,6 @@ def validate_payload(transcript_text: str, payload: dict[str, Any], *, provider:
         errors["quiz"] = "quiz_too_few"
 
     return errors
-
-
-def _attach_meta(payload: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
-    """Attach _meta into each section dict (safe for frontend; it ignores unknown keys)."""
-    out: dict[str, Any] = {}
-    for kind, section in payload.items():
-        if isinstance(section, dict):
-            merged = dict(section)
-            merged["_meta"] = meta
-            out[kind] = merged
-        else:
-            out[kind] = section
-    return out
 
 
 # ----------------------------
@@ -334,6 +329,15 @@ def upsert_material(
     return m
 
 
+def _with_meta(obj: dict[str, Any] | None, meta: dict[str, Any]) -> dict[str, Any]:
+    base = obj or {}
+    if not isinstance(base, dict):
+        return {"_meta": meta, "data": base}
+    out = dict(base)
+    out["_meta"] = meta
+    return out
+
+
 # ----------------------------
 # Main entrypoint used by Celery task
 # ----------------------------
@@ -346,56 +350,53 @@ def generate_and_store_all(db: Session, study_pack_id: int) -> None:
     if not sp.transcript_text:
         raise ValueError("StudyPack transcript_text is empty; ingest first.")
 
-    requested_provider = os.getenv("STUDY_MATERIALS_PROVIDER", "heuristic").lower().strip()
+    requested_provider = os.getenv("STUDY_MATERIALS_PROVIDER", "heuristic").lower()
     transcript_clean = _clean_text(sp.transcript_text)
 
-    used_provider = "heuristic"
-    openai_error: str | None = None
-    openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
     payload: dict[str, Any]
+    provider_used = "heuristic"
+    openai_error: str | None = None
 
     if requested_provider == "openai":
         try:
-            # IMPORTANT: this must import from your llm module
             from app.services.llm.openai_client import generate_study_materials_openai
-
             payload = generate_study_materials_openai(transcript_clean)
-            used_provider = "openai"
+            provider_used = "openai"
         except Exception as e:
-            # fall back, but record why (so you can prove what's happening)
             openai_error = str(e)
             payload = generate_materials_payload_heuristic(transcript_clean)
-            used_provider = "heuristic"
+            provider_used = "heuristic"
     else:
         payload = generate_materials_payload_heuristic(transcript_clean)
-        used_provider = "heuristic"
+        provider_used = "heuristic"
 
     meta = {
         "requested_provider": requested_provider,
-        "provider": used_provider,
-        "openai_model": openai_model if requested_provider == "openai" else None,
+        "provider": provider_used,
+        "openai_model": os.getenv("OPENAI_MODEL", None),
         "openai_error": openai_error,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "transcript_len": len(sp.transcript_text or ""),
+        "transcript_clean_len": len(transcript_clean),
     }
-    payload = _attach_meta(payload, meta)
 
-    errs = validate_payload(transcript_clean, payload, provider=used_provider)
+    errs = validate_payload(transcript_clean, payload, provider=provider_used)
 
-    # If OpenAI failed, propagate message onto each kind (still store fallback content)
+    # If OpenAI failed, surface the root error in every row (while storing heuristic fallback)
     if openai_error:
         for k in ["summary", "key_takeaways", "chapters", "flashcards", "quiz"]:
-            errs.setdefault(k, f"openai_failed_fallback_used: {openai_error}")
+            errs.setdefault(k, f"OpenAI failed; stored heuristic fallback. Root error: {openai_error}")
 
     kinds = ["summary", "key_takeaways", "chapters", "flashcards", "quiz"]
     for kind in kinds:
-        section = payload.get(kind) or {}
+        kind_obj = payload.get(kind) or {}
+        kind_obj = _with_meta(kind_obj if isinstance(kind_obj, dict) else {"data": kind_obj}, meta)
+
         upsert_material(
-            db=db,
-            study_pack_id=study_pack_id,
-            kind=kind,
+            db,
+            study_pack_id,
+            kind,
             status="generated",
-            content_json_obj=section if isinstance(section, dict) else {},
-            content_text=material_text(kind, section if isinstance(section, dict) else {}),
+            content_json_obj=kind_obj,
+            content_text=material_text(kind, kind_obj),
             error=errs.get(kind),
         )
