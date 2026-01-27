@@ -6,8 +6,13 @@ from app.db.session import get_db
 from app.models.study_pack import StudyPack
 from app.services.jobs import create_job
 from app.services.study_packs import create_study_pack
-from app.services.youtube import extract_youtube_video_id
-from app.worker.ingest_tasks import ingest_youtube_captions
+from app.services.youtube import (
+    extract_youtube_video_id,
+    extract_youtube_playlist_id,
+    fetch_playlist_metadata,
+    build_video_url,
+)
+from app.worker.ingest_tasks import ingest_youtube_captions, ingest_youtube_playlist
 
 router = APIRouter(prefix="/study-packs", tags=["study_packs"])
 
@@ -22,35 +27,95 @@ class StudyPackFromYoutubeResponse(BaseModel):
     study_pack_id: int
     job_id: int
     task_id: str
-    video_id: str
+    video_id: str | None = None
+
+    # playlist support (optional)
+    playlist_id: str | None = None
+    playlist_title: str | None = None
+    playlist_count: int | None = None
 
 
 @router.post("/from-youtube", response_model=StudyPackFromYoutubeResponse)
-def create_from_youtube(
-    req: StudyPackFromYoutubeRequest, db: Session = Depends(get_db)
-) -> StudyPackFromYoutubeResponse:
-    video_id = extract_youtube_video_id(req.url)
-    if not video_id:
-        raise HTTPException(status_code=400, detail="Invalid YouTube URL")
+def create_from_youtube(req: StudyPackFromYoutubeRequest, db: Session = Depends(get_db)) -> StudyPackFromYoutubeResponse:
+    url = (req.url or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required")
 
-    sp = create_study_pack(
+    video_id = extract_youtube_video_id(url)
+    if video_id:
+        sp = create_study_pack(
+            db,
+            source_type="youtube_video",
+            source_url=url,
+            source_id=video_id,
+            language=req.language,
+        )
+
+        job = create_job(db, "ingest_youtube_captions", {"study_pack_id": sp.id, "video_id": video_id})
+        async_result = ingest_youtube_captions.delay(job.id, sp.id, video_id, req.language)
+
+        return StudyPackFromYoutubeResponse(
+            ok=True,
+            study_pack_id=sp.id,
+            job_id=job.id,
+            task_id=async_result.id,
+            video_id=video_id,
+        )
+
+    # If not a single video, try playlist
+    playlist_id = extract_youtube_playlist_id(url)
+    if not playlist_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL (not a video or playlist)")
+
+    meta = fetch_playlist_metadata(url, max_items=200)
+    playlist_title = meta.get("playlist_title")
+    entries = meta.get("entries") or []
+
+    created_ids: list[int] = []
+    for e in entries:
+        vid = e["video_id"]
+        idx = e["index"]
+        title = e.get("title")
+
+        sp = create_study_pack(
+            db,
+            source_type="youtube_video",
+            source_url=build_video_url(vid, playlist_id=playlist_id, playlist_index=idx),
+            source_id=vid,
+            language=req.language,
+        )
+
+        # set playlist fields + title at creation time
+        sp.playlist_id = playlist_id
+        sp.playlist_title = playlist_title
+        sp.playlist_index = idx
+        if title and not sp.title:
+            sp.title = title
+
+        db.commit()
+        db.refresh(sp)
+        created_ids.append(sp.id)
+
+    if not created_ids:
+        raise HTTPException(status_code=400, detail="Playlist has no usable video entries")
+
+    job = create_job(
         db,
-        source_type="youtube_video",
-        source_url=req.url,
-        source_id=video_id,
-        language=req.language,
+        "ingest_youtube_playlist",
+        {"playlist_id": playlist_id, "study_pack_ids": created_ids, "url": url},
     )
+    async_result = ingest_youtube_playlist.delay(job.id, playlist_id, created_ids, req.language)
 
-    job = create_job(db, "ingest_youtube_captions", {"study_pack_id": sp.id, "video_id": video_id})
-
-    async_result = ingest_youtube_captions.delay(job.id, sp.id, video_id, req.language)
-
+    # Return the first pack id so current UI can auto-open /packs/:id
     return StudyPackFromYoutubeResponse(
         ok=True,
-        study_pack_id=sp.id,
+        study_pack_id=created_ids[0],
         job_id=job.id,
         task_id=async_result.id,
-        video_id=video_id,
+        video_id=None,
+        playlist_id=playlist_id,
+        playlist_title=playlist_title,
+        playlist_count=len(created_ids),
     )
 
 
@@ -76,5 +141,8 @@ def get_study_pack(study_pack_id: int, db: Session = Depends(get_db)):
             "error": sp.error,
             "created_at": sp.created_at.isoformat() if sp.created_at else None,
             "updated_at": sp.updated_at.isoformat() if sp.updated_at else None,
+            "playlist_id": sp.playlist_id,
+            "playlist_title": sp.playlist_title,
+            "playlist_index": sp.playlist_index,
         },
     }

@@ -141,7 +141,17 @@ export default function HomePage() {
                   <div style={{ fontWeight: 700, marginBottom: 8 }}>Created</div>
                   <div className="muted" style={{ display: "grid", gap: 4 }}>
                     <div>Study Pack ID: {createResp.study_pack_id}</div>
-                    <div>Video ID: {createResp.video_id}</div>
+                    <div>
+                      {createResp.playlist_id ? (
+                        <>
+                          <div>Playlist ID: {createResp.playlist_id}</div>
+                          {createResp.playlist_title ? <div>Playlist Title: {createResp.playlist_title}</div> : null}
+                          {typeof createResp.playlist_count === "number" ? <div>Playlist Videos: {createResp.playlist_count}</div> : null}
+                        </>
+                      ) : (
+                        <div>Video ID: {createResp.video_id}</div>
+                      )}
+                    </div>
                     <div>Job ID: {createResp.job_id}</div>
                     <div>Task ID: {createResp.task_id}</div>
                   </div>
