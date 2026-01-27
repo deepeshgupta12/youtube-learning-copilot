@@ -400,3 +400,4 @@ def generate_and_store_all(db: Session, study_pack_id: int) -> None:
             content_text=material_text(kind, kind_obj),
             error=errs.get(kind),
         )
+    return meta

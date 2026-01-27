@@ -27,13 +27,22 @@ def generate_for_study_pack(study_pack_id: int, db: Session = Depends(get_db)) -
     if not sp:
         raise HTTPException(status_code=404, detail="Study pack not found")
     if sp.status != "ingested":
-        raise HTTPException(status_code=400, detail="Study pack is not ingested yet")
+        raise HTTPException(status_code=400, detail=f"Study pack is not ingested yet (status={sp.status})")
 
     job = create_job(db, "generate_study_materials", {"study_pack_id": study_pack_id})
-
     async_result = generate_study_materials.delay(job.id, study_pack_id)
 
     return GenerateStudyMaterialsResponse(ok=True, study_pack_id=study_pack_id, job_id=job.id, task_id=async_result.id)
+
+
+def _safe_json_loads(s: str | None):
+    if not s:
+        return None
+    try:
+        return json.loads(s)
+    except Exception:
+        # Don't break API if one row has corrupted JSON.
+        return None
 
 
 @router.get("/{study_pack_id}/materials")
@@ -56,7 +65,7 @@ def get_materials(study_pack_id: int, db: Session = Depends(get_db)):
                 "id": r.id,
                 "kind": r.kind,
                 "status": r.status,
-                "content_json": json.loads(r.content_json) if r.content_json else None,
+                "content_json": _safe_json_loads(r.content_json),
                 "content_text": r.content_text,
                 "error": r.error,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
