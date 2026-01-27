@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any
+from typing import Any, Iterable
 
 from sqlalchemy.orm import Session
 
@@ -15,17 +15,264 @@ from app.models.study_pack import StudyPack
 # Text helpers
 # ----------------------------
 
+def _safe_str(x: Any) -> str:
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return x
+    try:
+        return str(x)
+    except Exception:
+        return ""
+
+
+def _as_list(x: Any) -> list:
+    if x is None:
+        return []
+    if isinstance(x, list):
+        return x
+    return [x]
+
+
+def _coerce_flashcard_item(item: Any) -> dict[str, str] | None:
+    """
+    Accepts:
+      - {"q": "...", "a": "..."}
+      - {"question": "...", "answer": "..."} (alt keys)
+      - "Q: ... A: ..." (string)
+      - any other scalar -> becomes answer text
+    Returns normalized dict {"q": "...", "a": "..."} or None if empty.
+    """
+    if item is None:
+        return None
+
+    if isinstance(item, dict):
+        q = _safe_str(item.get("q") or item.get("question") or "").strip()
+        a = _safe_str(item.get("a") or item.get("answer") or "").strip()
+
+        # If dict contains only one field, treat it as answer
+        if not a and not q:
+            # Try common single-field cases
+            if "text" in item:
+                a = _safe_str(item.get("text")).strip()
+            elif "content" in item:
+                a = _safe_str(item.get("content")).strip()
+
+        if not q and a:
+            # Provide a generic question if missing
+            q = "Key idea"
+
+        if q or a:
+            return {"q": q or "Key idea", "a": a}
+        return None
+
+    if isinstance(item, str):
+        s = item.strip()
+        if not s:
+            return None
+
+        # Try split on "A:" or "Answer:"
+        m = re.split(r"\bA(?:nswer)?:\s*", s, maxsplit=1, flags=re.IGNORECASE)
+        if len(m) == 2:
+            left = m[0]
+            right = m[1]
+            left = re.sub(r"^\s*Q(?:uestion)?:\s*", "", left.strip(), flags=re.IGNORECASE)
+            q = left.strip() or "Key idea"
+            a = right.strip()
+            return {"q": q, "a": a}
+
+        # If string has " - " separator
+        if " - " in s:
+            parts = s.split(" - ", 1)
+            q = parts[0].strip() or "Key idea"
+            a = parts[1].strip()
+            return {"q": q, "a": a}
+
+        # Otherwise treat whole string as answer
+        return {"q": "Key idea", "a": s}
+
+    # Fallback for non-string scalars
+    s = _safe_str(item).strip()
+    if not s:
+        return None
+    return {"q": "Key idea", "a": s}
+
+
+def _coerce_quiz_item(item: Any) -> dict[str, Any] | None:
+    """
+    Accepts:
+      - {"question": "...", "options": [...], "answer_index": 0}
+      - {"q": "...", "choices": [...], "answer": 2} (alt keys)
+      - string -> becomes question with generic options
+    Returns normalized dict or None.
+    """
+    if item is None:
+        return None
+
+    if isinstance(item, dict):
+        question = _safe_str(item.get("question") or item.get("q") or "").strip()
+        options = item.get("options") or item.get("choices") or []
+        options_list = [ _safe_str(o).strip() for o in _as_list(options) if _safe_str(o).strip() ]
+
+        ans = item.get("answer_index")
+        if ans is None:
+            ans = item.get("answer")
+        try:
+            answer_index = int(ans) if ans is not None else None
+        except Exception:
+            answer_index = None
+
+        if question and not options_list:
+            options_list = ["Option A", "Option B", "Option C", "Option D"]
+
+        out: dict[str, Any] = {"question": question, "options": options_list}
+        if isinstance(answer_index, int):
+            out["answer_index"] = answer_index
+        return out if question else None
+
+    if isinstance(item, str):
+        s = item.strip()
+        if not s:
+            return None
+        return {
+            "question": s,
+            "options": ["True", "False", "Not mentioned", "Unclear"],
+            "answer_index": 0,
+        }
+
+    s = _safe_str(item).strip()
+    if not s:
+        return None
+    return {
+        "question": s,
+        "options": ["True", "False", "Not mentioned", "Unclear"],
+        "answer_index": 0,
+    }
+
+
+def normalize_materials_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """
+    Defensive normalization layer for LLM outputs.
+    Ensures the expected shapes:
+      - summary: {"text": str}
+      - key_takeaways: {"items": list[str]}
+      - chapters: {"items": list[dict]}
+      - flashcards: {"items": list[{"q": str, "a": str}]}
+      - quiz: {"items": list[{"question": str, "options": list[str], "answer_index": int?}]}
+    """
+    if not isinstance(payload, dict):
+        return {}
+
+    out: dict[str, Any] = dict(payload)
+
+    # summary
+    summary = out.get("summary")
+    if isinstance(summary, str):
+        out["summary"] = {"text": summary}
+    elif isinstance(summary, dict):
+        out["summary"] = {"text": _safe_str(summary.get("text")).strip()}
+
+    # key_takeaways
+    kt = out.get("key_takeaways")
+    if isinstance(kt, dict):
+        items = kt.get("items")
+        if isinstance(items, str):
+            items_list = [x.strip() for x in re.split(r"[\n•\-]+", items) if x.strip()]
+        else:
+            items_list = [_safe_str(x).strip() for x in _as_list(items)]
+            items_list = [x for x in items_list if x]
+        out["key_takeaways"] = {"items": items_list}
+    elif isinstance(kt, list):
+        out["key_takeaways"] = {"items": [_safe_str(x).strip() for x in kt if _safe_str(x).strip()]}
+    elif isinstance(kt, str):
+        items_list = [x.strip() for x in re.split(r"[\n•\-]+", kt) if x.strip()]
+        out["key_takeaways"] = {"items": items_list}
+
+    # chapters
+    ch = out.get("chapters")
+    if isinstance(ch, dict):
+        items = ch.get("items")
+        items_list: list[dict[str, Any]] = []
+        for x in _as_list(items):
+            if isinstance(x, dict):
+                items_list.append(x)
+            elif isinstance(x, str) and x.strip():
+                items_list.append({"title": "Chapter", "summary": x.strip(), "sentences": [x.strip()]})
+        out["chapters"] = {"items": items_list}
+    elif isinstance(ch, list):
+        items_list = []
+        for x in ch:
+            if isinstance(x, dict):
+                items_list.append(x)
+            elif isinstance(x, str) and x.strip():
+                items_list.append({"title": "Chapter", "summary": x.strip(), "sentences": [x.strip()]})
+        out["chapters"] = {"items": items_list}
+
+    # flashcards
+    fc = out.get("flashcards")
+    if isinstance(fc, dict):
+        items = fc.get("items")
+        norm_items: list[dict[str, str]] = []
+        for x in _as_list(items):
+            obj = _coerce_flashcard_item(x)
+            if obj and (obj.get("q") or obj.get("a")):
+                norm_items.append(obj)
+        out["flashcards"] = {"items": norm_items}
+    elif isinstance(fc, list):
+        norm_items = []
+        for x in fc:
+            obj = _coerce_flashcard_item(x)
+            if obj and (obj.get("q") or obj.get("a")):
+                norm_items.append(obj)
+        out["flashcards"] = {"items": norm_items}
+    elif isinstance(fc, str) and fc.strip():
+        # Split into lines as separate flashcards
+        norm_items = []
+        for line in fc.splitlines():
+            obj = _coerce_flashcard_item(line)
+            if obj:
+                norm_items.append(obj)
+        out["flashcards"] = {"items": norm_items}
+
+    # quiz
+    qz = out.get("quiz")
+    if isinstance(qz, dict):
+        items = qz.get("items")
+        norm_items: list[dict[str, Any]] = []
+        for x in _as_list(items):
+            obj = _coerce_quiz_item(x)
+            if obj:
+                norm_items.append(obj)
+        out["quiz"] = {"items": norm_items}
+    elif isinstance(qz, list):
+        norm_items = []
+        for x in qz:
+            obj = _coerce_quiz_item(x)
+            if obj:
+                norm_items.append(obj)
+        out["quiz"] = {"items": norm_items}
+    elif isinstance(qz, str) and qz.strip():
+        norm_items = []
+        for line in qz.splitlines():
+            obj = _coerce_quiz_item(line)
+            if obj:
+                norm_items.append(obj)
+        out["quiz"] = {"items": norm_items}
+
+    return out
+
+
 def material_text(kind: str, payload: dict) -> str | None:
     """Create a text fallback for UI/search even if payload is JSON."""
-    if not payload:
+    if not payload or not isinstance(payload, dict):
         return None
 
     if kind == "summary":
-        return payload.get("text")
+        return _safe_str(payload.get("text")).strip() or None
 
     if kind == "key_takeaways":
         items = payload.get("items") or []
-        items = [str(x).strip() for x in items if str(x).strip()]
+        items = [str(x).strip() for x in _as_list(items) if str(x).strip()]
         return "\n".join([f"- {x}" for x in items]) if items else None
 
     if kind == "chapters":
@@ -33,14 +280,20 @@ def material_text(kind: str, payload: dict) -> str | None:
         if not items:
             return None
         lines: list[str] = []
-        for ch in items:
-            title = ch.get("title")
-            summ = ch.get("summary")
-            if title:
-                lines.append(str(title))
-            if summ:
-                lines.append(str(summ))
-            lines.append("")
+        for ch in _as_list(items):
+            if isinstance(ch, dict):
+                title = _safe_str(ch.get("title")).strip()
+                summ = _safe_str(ch.get("summary")).strip()
+                if title:
+                    lines.append(title)
+                if summ:
+                    lines.append(summ)
+                lines.append("")
+            else:
+                s = _safe_str(ch).strip()
+                if s:
+                    lines.append(s)
+                    lines.append("")
         text = "\n".join(lines).strip()
         return text or None
 
@@ -49,9 +302,12 @@ def material_text(kind: str, payload: dict) -> str | None:
         if not items:
             return None
         lines: list[str] = []
-        for i, fc in enumerate(items, start=1):
-            q = fc.get("q")
-            a = fc.get("a")
+        for i, fc in enumerate(_as_list(items), start=1):
+            obj = _coerce_flashcard_item(fc)
+            if not obj:
+                continue
+            q = _safe_str(obj.get("q")).strip()
+            a = _safe_str(obj.get("a")).strip()
             if q:
                 lines.append(f"Q{i}. {q}")
             if a:
@@ -65,10 +321,15 @@ def material_text(kind: str, payload: dict) -> str | None:
         if not items:
             return None
         lines: list[str] = []
-        for i, q in enumerate(items, start=1):
-            question = q.get("question")
-            options = q.get("options") or []
-            answer_index = q.get("answer_index")
+        for i, q in enumerate(_as_list(items), start=1):
+            obj = _coerce_quiz_item(q)
+            if not obj:
+                continue
+            question = _safe_str(obj.get("question")).strip()
+            options = obj.get("options") or []
+            options = [_safe_str(o).strip() for o in _as_list(options) if _safe_str(o).strip()]
+            answer_index = obj.get("answer_index")
+
             if question:
                 lines.append(f"Q{i}. {question}")
             for j, opt in enumerate(options, start=1):
@@ -370,6 +631,9 @@ def generate_and_store_all(db: Session, study_pack_id: int) -> None:
         payload = generate_materials_payload_heuristic(transcript_clean)
         provider_used = "heuristic"
 
+    # Normalize payload defensively (critical fix for your crash)
+    payload = normalize_materials_payload(payload)
+
     meta = {
         "requested_provider": requested_provider,
         "provider": provider_used,
@@ -389,7 +653,9 @@ def generate_and_store_all(db: Session, study_pack_id: int) -> None:
     kinds = ["summary", "key_takeaways", "chapters", "flashcards", "quiz"]
     for kind in kinds:
         kind_obj = payload.get(kind) or {}
-        kind_obj = _with_meta(kind_obj if isinstance(kind_obj, dict) else {"data": kind_obj}, meta)
+        if not isinstance(kind_obj, dict):
+            kind_obj = {"data": kind_obj}
+        kind_obj = _with_meta(kind_obj, meta)
 
         upsert_material(
             db,
