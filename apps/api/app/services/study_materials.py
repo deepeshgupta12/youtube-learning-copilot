@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -107,30 +108,19 @@ def _dedupe_consecutive_ngrams(words: list[str], n: int) -> list[str]:
 
 
 def _clean_text(text: str) -> str:
-    """Normalize transcript text for downstream material generation.
-
-    Key goals:
-    - Remove common stage directions like [Music], [Laughter]
-    - Collapse extreme whitespace/newlines
-    - Reduce common back-to-back repetition caused by noisy captions
-    """
+    """Normalize transcript text for downstream material generation."""
     s = (text or "").strip()
     if not s:
         return ""
 
-    # Remove stage directions (best-effort)
     s = _STAGE_DIR_RE.sub(" ", s)
-
-    # Normalize whitespace
     s = re.sub(r"\s+", " ", s).strip()
 
-    # Light de-duplication for repeated captions (run a few n-gram passes)
     words = s.split()
     for n in (12, 10, 8, 6):
         words = _dedupe_consecutive_ngrams(words, n)
     s = " ".join(words)
 
-    # Final whitespace normalize
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
@@ -143,24 +133,17 @@ def _chunk_words(text: str, chunk_words: int = 28) -> list[str]:
 
 
 def _simple_sentence_split(text: str) -> list[str]:
-    """Make a 'sentence-like' list from transcript.
-
-    Many YouTube transcripts have *no punctuation*, so a punctuation-only split collapses
-    to a single mega string, which then causes every material type to look identical.
-    """
+    """Make a 'sentence-like' list from transcript, even if punctuation is missing."""
     text = _clean_text(text)
     if not text:
         return []
 
-    # Punctuation-based split
     parts = re.split(r"(?<=[.!?])\s+", text)
     parts = [p.strip() for p in parts if p.strip()]
 
-    # Fallback if punctuation missing / too few parts
     if len(parts) < 6:
         parts = _chunk_words(text, chunk_words=28)
 
-    # Remove ultra-short fragments
     parts = [p for p in parts if len(p.split()) >= 6]
     return parts
 
@@ -182,8 +165,6 @@ def _pick_evenly(items: list[str], k: int) -> list[str]:
     return out[:k]
 
 
-
-
 # ----------------------------
 # Heuristic V0 generator
 # ----------------------------
@@ -193,18 +174,15 @@ def generate_materials_payload_heuristic(transcript_text: str) -> dict[str, Any]
     text = _clean_text(transcript_text)
     sents = _simple_sentence_split(text)
 
-    # SUMMARY: spread across transcript (begin + middle + end)
     if sents:
         picks = _pick_evenly(sents, k=3)
         summary = " ".join(picks).strip()
     else:
         summary = (text[:500] if text else "").strip()
 
-    # TAKEAWAYS: 6 evenly spread lines
     takeaways = _pick_evenly(sents, k=6) if sents else []
     takeaways = [t.strip() for t in takeaways if t.strip()]
 
-    # CHAPTERS: group into 4–6 chapters depending on length
     chapters: list[dict[str, Any]] = []
     if sents:
         target_chapters = 6 if len(sents) >= 24 else 4
@@ -221,7 +199,6 @@ def generate_materials_payload_heuristic(transcript_text: str) -> dict[str, Any]
                 }
             )
 
-    # FLASHCARDS: derive Q/A from takeaways but keep answers short-ish
     flashcards: list[dict[str, str]] = []
     for i, t in enumerate(takeaways[:10], start=1):
         ans = t.strip()
@@ -229,7 +206,6 @@ def generate_materials_payload_heuristic(transcript_text: str) -> dict[str, Any]
             ans = " ".join(ans.split()[:40]).strip() + "…"
         flashcards.append({"q": f"Key idea #{i}", "a": ans})
 
-    # QUIZ: lightweight MCQ from takeaways
     quiz: list[dict[str, Any]] = []
     for i, t in enumerate(takeaways[:5], start=1):
         correct = t.strip()
@@ -258,11 +234,10 @@ def generate_materials_payload_heuristic(transcript_text: str) -> dict[str, Any]
 
 
 # ----------------------------
-# Guardrails
+# Validation (lightweight)
 # ----------------------------
 
 def _overlap_ratio(a: str, b: str) -> float:
-    """Cheap containment heuristic: token overlap ratio."""
     a = _clean_text(a)
     b = _clean_text(b)
     if not a or not b:
@@ -277,7 +252,7 @@ def _overlap_ratio(a: str, b: str) -> float:
 
 
 def validate_payload(transcript_text: str, payload: dict[str, Any], *, provider: str) -> dict[str, str]:
-    """Returns {kind: error_code} for failures. Empty dict = pass."""
+    """Returns {kind: error_code}. Empty dict = pass."""
     errors: dict[str, str] = {}
 
     transcript = _clean_text(transcript_text)
@@ -286,7 +261,7 @@ def validate_payload(transcript_text: str, payload: dict[str, Any], *, provider:
     summary_text = (payload.get("summary") or {}).get("text") or ""
     summary_text = _clean_text(summary_text)
 
-    # Only enforce "synthesized" checks for LLM providers (heuristic is extractive by design)
+    # only enforce synthesized checks for openai outputs
     if provider == "openai" and tlen > 600:
         if len(summary_text) > 1200:
             errors["summary"] = "summary_too_long"
@@ -313,6 +288,19 @@ def validate_payload(transcript_text: str, payload: dict[str, Any], *, provider:
         errors["quiz"] = "quiz_too_few"
 
     return errors
+
+
+def _attach_meta(payload: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    """Attach _meta into each section dict (safe for frontend; it ignores unknown keys)."""
+    out: dict[str, Any] = {}
+    for kind, section in payload.items():
+        if isinstance(section, dict):
+            merged = dict(section)
+            merged["_meta"] = meta
+            out[kind] = merged
+        else:
+            out[kind] = section
+    return out
 
 
 # ----------------------------
@@ -358,50 +346,56 @@ def generate_and_store_all(db: Session, study_pack_id: int) -> None:
     if not sp.transcript_text:
         raise ValueError("StudyPack transcript_text is empty; ingest first.")
 
-    provider = os.getenv("STUDY_MATERIALS_PROVIDER", "heuristic").lower()
-
+    requested_provider = os.getenv("STUDY_MATERIALS_PROVIDER", "heuristic").lower().strip()
     transcript_clean = _clean_text(sp.transcript_text)
 
-    payload: dict[str, Any]
+    used_provider = "heuristic"
     openai_error: str | None = None
+    openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-    if provider == "openai":
+    payload: dict[str, Any]
+
+    if requested_provider == "openai":
         try:
+            # IMPORTANT: this must import from your llm module
             from app.services.llm.openai_client import generate_study_materials_openai
+
             payload = generate_study_materials_openai(transcript_clean)
+            used_provider = "openai"
         except Exception as e:
-            # fail loudly into DB rows so UI shows what happened
+            # fall back, but record why (so you can prove what's happening)
             openai_error = str(e)
             payload = generate_materials_payload_heuristic(transcript_clean)
+            used_provider = "heuristic"
     else:
         payload = generate_materials_payload_heuristic(transcript_clean)
+        used_provider = "heuristic"
 
-    errs = validate_payload(transcript_clean, payload)
+    meta = {
+        "requested_provider": requested_provider,
+        "provider": used_provider,
+        "openai_model": openai_model if requested_provider == "openai" else None,
+        "openai_error": openai_error,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    payload = _attach_meta(payload, meta)
 
-    # If OpenAI failed, tag every kind with the OpenAI error (but still store heuristic content)
+    errs = validate_payload(transcript_clean, payload, provider=used_provider)
+
+    # If OpenAI failed, propagate message onto each kind (still store fallback content)
     if openai_error:
         for k in ["summary", "key_takeaways", "chapters", "flashcards", "quiz"]:
-            errs.setdefault(k, f"OpenAI failed, stored heuristic fallback. Root error: {openai_error}")
+            errs.setdefault(k, f"openai_failed_fallback_used: {openai_error}")
 
     kinds = ["summary", "key_takeaways", "chapters", "flashcards", "quiz"]
     for kind in kinds:
-        if kind in errs:
-            upsert_material(
-                db,
-                study_pack_id,
-                kind,
-                status="generated",  # still generated (fallback) but with error banner
-                content_json_obj=payload.get(kind),
-                content_text=material_text(kind, payload.get(kind) or {}),
-                error=errs[kind],
-            )
-        else:
-            upsert_material(
-                db,
-                study_pack_id,
-                kind,
-                status="generated",
-                content_json_obj=payload.get(kind),
-                content_text=material_text(kind, payload.get(kind) or {}),
-                error=None,
-            )
+        section = payload.get(kind) or {}
+        upsert_material(
+            db=db,
+            study_pack_id=study_pack_id,
+            kind=kind,
+            status="generated",
+            content_json_obj=section if isinstance(section, dict) else {},
+            content_text=material_text(kind, section if isinstance(section, dict) else {}),
+            error=errs.get(kind),
+        )
