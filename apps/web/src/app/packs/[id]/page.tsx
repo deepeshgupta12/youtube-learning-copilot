@@ -20,150 +20,185 @@ function toInt(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-type TabKey = "summary" | "key_takeaways" | "chapters" | "flashcards" | "quiz";
+const KINDS = ["summary", "key_takeaways", "chapters", "flashcards", "quiz"] as const;
+type Kind = (typeof KINDS)[number];
 
-const TAB_LABELS: Record<TabKey, string> = {
-  summary: "Summary",
-  key_takeaways: "Key takeaways",
-  chapters: "Chapters",
-  flashcards: "Flashcards",
-  quiz: "Quiz",
-};
-
-function byKind(materials: StudyMaterialRow[] | null, kind: TabKey): StudyMaterialRow | null {
-  if (!materials?.length) return null;
-  return materials.find((m) => m.kind === kind) || null;
-}
-
-function shortUrl(u?: string | null): string {
-  if (!u) return "-";
-  if (u.length <= 70) return u;
-  return `${u.slice(0, 50)}…${u.slice(-16)}`;
-}
-
-function MetaLine({ label, value }: { label: string; value: any }) {
+function GlassCard({
+  title,
+  right,
+  children,
+}: {
+  title?: string;
+  right?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="kv">
-      <b>{label}</b>
-      <span className="muted" style={{ wordBreak: "break-word" }}>
-        {value}
-      </span>
-    </div>
+    <section
+      className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl shadow-[0_8px_40px_rgba(0,0,0,0.35)]"
+    >
+      {(title || right) && (
+        <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-white/10">
+          <div className="text-sm font-semibold text-white/90">{title}</div>
+          <div className="text-xs text-white/60">{right}</div>
+        </div>
+      )}
+      <div className="p-5">{children}</div>
+    </section>
   );
 }
 
-function renderSummary(m: StudyMaterialRow) {
-  const text = m.content_text || (m.content_json as any)?.text || "";
-  if (!text) return <div className="muted">No summary found.</div>;
-  return <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.75 }}>{text}</div>;
-}
-
-function renderTakeaways(m: StudyMaterialRow) {
-  const items: string[] = ((m.content_json as any)?.items || []) as string[];
-  if (!items?.length) return <div className="muted">No takeaways found.</div>;
+function PillTabs({
+  active,
+  onChange,
+  counts,
+}: {
+  active: Kind;
+  onChange: (k: Kind) => void;
+  counts: Record<string, number>;
+}) {
   return (
-    <ul style={{ marginTop: 0, lineHeight: 1.75 }}>
-      {items.map((t, i) => (
-        <li key={i} style={{ marginBottom: 8 }}>
-          {t}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-function renderChapters(m: StudyMaterialRow) {
-  const items: any[] = ((m.content_json as any)?.items || []) as any[];
-  if (!items?.length) return <div className="muted">No chapters found.</div>;
-
-  return (
-    <div style={{ display: "grid", gap: 12 }}>
-      {items.map((ch, i) => (
-        <div key={i} className="glass card" style={{ background: "rgba(255,255,255,0.05)", boxShadow: "var(--shadow2)" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
-            <div style={{ fontWeight: 800, letterSpacing: "-0.01em" }}>{ch?.title || `Chapter ${i + 1}`}</div>
-            <span className="badge subtle">
-              <span className="muted2">#{i + 1}</span>
+    <div className="flex flex-wrap gap-2">
+      {KINDS.map((k) => {
+        const isActive = active === k;
+        return (
+          <button
+            key={k}
+            onClick={() => onChange(k)}
+            className={[
+              "rounded-full px-3 py-1.5 text-xs border transition",
+              isActive
+                ? "bg-white/12 border-white/20 text-white"
+                : "bg-white/5 border-white/10 text-white/70 hover:text-white hover:bg-white/8",
+            ].join(" ")}
+          >
+            {k === "key_takeaways" ? "Key takeaways" : k[0].toUpperCase() + k.slice(1)}
+            <span className="ml-2 text-[10px] text-white/50">
+              {counts[k] ?? 0}
             </span>
-          </div>
-          {ch?.summary && <div className="muted" style={{ marginTop: 8, lineHeight: 1.75 }}>{ch.summary}</div>}
-
-          {Array.isArray(ch?.sentences) && ch.sentences.length > 0 && (
-            <details style={{ marginTop: 10 }}>
-              <summary style={{ cursor: "pointer" }} className="muted">
-                Show transcript snippets
-              </summary>
-              <ul style={{ marginTop: 10, lineHeight: 1.75 }}>
-                {ch.sentences.map((s: string, j: number) => (
-                  <li key={j} style={{ marginBottom: 8 }}>
-                    {s}
-                  </li>
-                ))}
-              </ul>
-            </details>
-          )}
-        </div>
-      ))}
+          </button>
+        );
+      })}
     </div>
   );
 }
 
-function renderFlashcards(m: StudyMaterialRow) {
-  const items: any[] = ((m.content_json as any)?.items || []) as any[];
-  if (!items?.length) return <div className="muted">No flashcards found.</div>;
+function RenderMaterial({ m }: { m: StudyMaterialRow }) {
+  const kind = m.kind as Kind;
 
-  return (
-    <div style={{ display: "grid", gap: 10 }}>
-      {items.map((fc, i) => (
-        <div key={i} className="glass card" style={{ background: "rgba(255,255,255,0.05)", boxShadow: "var(--shadow2)" }}>
-          <div style={{ fontWeight: 800, letterSpacing: "-0.01em" }}>
-            Q{i + 1}. {fc?.q}
-          </div>
-          <div className="muted" style={{ marginTop: 10, lineHeight: 1.75 }}>
-            A{i + 1}. {fc?.a}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
+  if (kind === "summary") {
+    const text = m.content_text || (m.content_json as any)?.text || "";
+    return <div className="whitespace-pre-wrap leading-7 text-white/85">{text}</div>;
+  }
 
-function renderQuiz(m: StudyMaterialRow) {
-  const items: any[] = ((m.content_json as any)?.items || []) as any[];
-  if (!items?.length) return <div className="muted">No quiz found.</div>;
+  if (kind === "key_takeaways") {
+    const items: string[] = ((m.content_json as any)?.items || []) as string[];
+    if (!items?.length) return <div className="text-white/60">No takeaways found.</div>;
+    return (
+      <ul className="list-disc pl-5 space-y-2">
+        {items.map((t, i) => (
+          <li key={i} className="leading-7 text-white/85">
+            {t}
+          </li>
+        ))}
+      </ul>
+    );
+  }
 
-  return (
-    <div style={{ display: "grid", gap: 10 }}>
-      {items.map((q, i) => (
-        <div key={i} className="glass card" style={{ background: "rgba(255,255,255,0.05)", boxShadow: "var(--shadow2)" }}>
-          <div style={{ fontWeight: 800, letterSpacing: "-0.01em", lineHeight: 1.45 }}>
-            {i + 1}. {q?.question}
-          </div>
-          <ol style={{ marginTop: 10, lineHeight: 1.75 }}>
-            {(q?.options || []).map((opt: string, j: number) => (
-              <li key={j} style={{ marginBottom: 8 }}>
-                {opt}
-              </li>
-            ))}
-          </ol>
-          {typeof q?.answer_index === "number" && (
-            <div className="badge" style={{ marginTop: 10 }}>
-              <span className="muted2">Answer</span>&nbsp; <span className="mono">{q.answer_index + 1}</span>
+  if (kind === "chapters") {
+    const items: any[] = ((m.content_json as any)?.items || []) as any[];
+    if (!items?.length) return <div className="text-white/60">No chapters found.</div>;
+    return (
+      <div className="grid gap-3">
+        {items.map((ch, i) => (
+          <div
+            key={i}
+            className="rounded-xl border border-white/10 bg-white/5 p-4"
+          >
+            <div className="font-semibold text-white/90">
+              {ch?.title || `Chapter ${i + 1}`}
             </div>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
+            {ch?.summary && (
+              <div className="mt-2 text-white/75 leading-7">{ch.summary}</div>
+            )}
 
-function renderTab(m: StudyMaterialRow | null, tab: TabKey) {
-  if (!m) return <div className="muted">No material generated for this section yet.</div>;
-  if (tab === "summary") return renderSummary(m);
-  if (tab === "key_takeaways") return renderTakeaways(m);
-  if (tab === "chapters") return renderChapters(m);
-  if (tab === "flashcards") return renderFlashcards(m);
-  return renderQuiz(m);
+            {Array.isArray(ch?.sentences) && ch.sentences.length > 0 && (
+              <details className="mt-3">
+                <summary className="cursor-pointer text-xs text-white/60 hover:text-white/80">
+                  View sentences
+                </summary>
+                <ul className="mt-2 list-disc pl-5 space-y-2">
+                  {ch.sentences.map((s: string, j: number) => (
+                    <li key={j} className="text-white/75 leading-7">
+                      {s}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (kind === "flashcards") {
+    const items: any[] = ((m.content_json as any)?.items || []) as any[];
+    if (!items?.length) return <div className="text-white/60">No flashcards found.</div>;
+    return (
+      <div className="grid gap-3">
+        {items.map((fc, i) => (
+          <div
+            key={i}
+            className="rounded-xl border border-white/10 bg-white/5 p-4"
+          >
+            <div className="font-semibold text-white/90">
+              Q{i + 1}. {fc?.q}
+            </div>
+            <div className="mt-2 text-white/80 leading-7">
+              A{i + 1}. {fc?.a}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (kind === "quiz") {
+    const items: any[] = ((m.content_json as any)?.items || []) as any[];
+    if (!items?.length) return <div className="text-white/60">No quiz found.</div>;
+    return (
+      <div className="grid gap-3">
+        {items.map((q, i) => (
+          <div
+            key={i}
+            className="rounded-xl border border-white/10 bg-white/5 p-4"
+          >
+            <div className="font-semibold text-white/90 leading-6">
+              {i + 1}. {q?.question}
+            </div>
+            <ol className="mt-3 list-decimal pl-5 space-y-2">
+              {(q?.options || []).map((opt: string, j: number) => (
+                <li key={j} className="text-white/80 leading-7">
+                  {opt}
+                </li>
+              ))}
+            </ol>
+            {typeof q?.answer_index === "number" && (
+              <div className="mt-3 text-xs text-white/60">
+                Answer: {q.answer_index + 1}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <pre className="whitespace-pre-wrap text-xs text-white/70">
+      {JSON.stringify(m.content_json, null, 2)}
+    </pre>
+  );
 }
 
 export default function PackPage() {
@@ -173,13 +208,26 @@ export default function PackPage() {
   const [pack, setPack] = useState<StudyPackResponse["study_pack"] | null>(null);
   const [materials, setMaterials] = useState<StudyMaterialRow[] | null>(null);
 
-  const [loading, setLoading] = useState<boolean>(true);
-  const [running, setRunning] = useState<boolean>(false);
-
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
   const [lastJob, setLastJob] = useState<JobGetResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  const [tab, setTab] = useState<TabKey>("summary");
+  const [tab, setTab] = useState<Kind>("summary");
+
+  const counts = useMemo(() => {
+    const c: Record<string, number> = { summary: 0, key_takeaways: 0, chapters: 0, flashcards: 0, quiz: 0 };
+    for (const m of materials || []) {
+      const k = m.kind;
+      if (typeof k === "string") c[k] = (c[k] || 0) + 1;
+    }
+    return c;
+  }, [materials]);
+
+  const currentMaterial = useMemo(() => {
+    const list = materials || [];
+    return list.find((m) => m.kind === tab) || null;
+  }, [materials, tab]);
 
   async function refreshAll() {
     if (!studyPackId) return;
@@ -220,130 +268,118 @@ export default function PackPage() {
   }, [studyPackId]);
 
   if (!studyPackId) {
-    return (
-      <main style={{ marginTop: 18 }}>
-        <section className="glass card">
-          <div className="card-title">Invalid pack id</div>
-          <Link className="btn" href="/">Go home</Link>
-        </section>
-      </main>
-    );
+    return <div className="p-6 text-white/80">Invalid pack id.</div>;
   }
 
-  const current = byKind(materials, tab);
-
   return (
-    <main style={{ marginTop: 18 }}>
-      {/* TOP BAR */}
-      <section className="glass card">
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <div>
-            <Link href="/" className="muted">← Back</Link>
-            <h1 style={{ margin: "8px 0 0", fontSize: 26, letterSpacing: "-0.03em" }}>
-              Study Pack <span className="mono">#{studyPackId}</span>
-            </h1>
-            <div className="muted" style={{ marginTop: 6 }}>
-              Generate and browse materials in a clean structure.
-            </div>
-          </div>
+    <main className="mx-auto w-full max-w-5xl px-6 py-10">
+      <div className="flex items-center justify-between gap-4">
+        <Link href="/" className="text-sm text-white/70 hover:text-white">
+          ← Back
+        </Link>
 
-          <div className="row">
-            <button className="btn ghost" onClick={refreshAll} disabled={loading || running}>
-              {loading ? "Refreshing…" : "Refresh"}
-            </button>
-            <button className="btn primary" onClick={onGenerate} disabled={loading || running}>
-              {running ? "Generating…" : "Generate materials"}
-            </button>
-          </div>
+        <div className="flex gap-2">
+          <button
+            onClick={refreshAll}
+            disabled={loading || running}
+            className="rounded-xl border border-white/15 bg-white/5 px-4 py-2 text-xs text-white/85 hover:bg-white/8 disabled:opacity-50"
+          >
+            Refresh
+          </button>
+          <button
+            onClick={onGenerate}
+            disabled={loading || running}
+            className="rounded-xl border border-white/15 bg-white/10 px-4 py-2 text-xs text-white hover:bg-white/15 disabled:opacity-50"
+          >
+            Generate materials
+          </button>
         </div>
+      </div>
 
-        {err && (
-          <div className="alert" style={{ marginTop: 12 }}>
-            <strong>Error:</strong> {err}
-          </div>
-        )}
+      <div className="mt-6">
+        <h1 className="text-3xl font-semibold text-white">Study Pack #{studyPackId}</h1>
+        <p className="mt-2 text-sm text-white/60">
+          Generate and browse materials in a clean structure.
+        </p>
+      </div>
 
+      {err && (
+        <div className="mt-4 rounded-xl border border-red-400/30 bg-red-400/10 px-4 py-3 text-sm text-red-100 whitespace-pre-wrap">
+          {err}
+        </div>
+      )}
+
+      <div className="mt-6 grid gap-4">
         {lastJob && (
-          <div className="success" style={{ marginTop: 12 }}>
-            <div className="row" style={{ justifyContent: "space-between" }}>
-              <div>
-                <strong>Last generation job:</strong> <span className="mono">#{lastJob.job_id}</span>
+          <GlassCard
+            title="Last generation job"
+            right={<span className="text-white/60">Job #{lastJob.job_id}</span>}
+          >
+            <div className="flex items-center justify-between">
+              <div className="text-sm text-white/80">
+                Status: <span className="font-semibold text-white">{lastJob.status}</span>
               </div>
-              <span className="badge">
-                <span className="muted2">Status</span>&nbsp; <span className="mono">{lastJob.status}</span>
-              </span>
+              {lastJob.error ? (
+                <div className="text-xs text-red-200">{lastJob.error}</div>
+              ) : (
+                <div className="text-xs text-white/50">OK</div>
+              )}
             </div>
-            {lastJob.error && (
-              <div style={{ marginTop: 8 }}>
-                <strong>Job error:</strong> {lastJob.error}
+          </GlassCard>
+        )}
+
+        <GlassCard title="Pack details">
+          {loading && <div className="text-sm text-white/60">Loading…</div>}
+
+          {pack && (
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <div className="space-y-2">
+                <div className="text-xs text-white/50">Source</div>
+                <div className="text-sm text-white/90">{pack.source_type}</div>
               </div>
-            )}
-          </div>
-        )}
-      </section>
 
-      {/* PACK META */}
-      <section className="glass card" style={{ marginTop: 14 }}>
-        <div className="card-title">Pack details</div>
-        {!pack ? (
-          <div className="muted">{loading ? "Loading…" : "Not found."}</div>
-        ) : (
-          <div style={{ display: "grid", gap: 6 }}>
-            <MetaLine label="Source" value={pack.source_type} />
-            <MetaLine label="URL" value={<span className="mono">{shortUrl(pack.source_url)}</span>} />
-            <MetaLine label="Language" value={<span className="mono">{pack.language || "-"}</span>} />
-            <MetaLine label="Status" value={<span className="mono">{pack.status}</span>} />
-          </div>
-        )}
-      </section>
+              <div className="space-y-2">
+                <div className="text-xs text-white/50">Language</div>
+                <div className="text-sm text-white/90">{pack.language || "-"}</div>
+              </div>
 
-      {/* MATERIALS */}
-      <section className="glass card" style={{ marginTop: 14 }}>
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <div className="card-title" style={{ marginBottom: 0 }}>
-            Materials
-          </div>
+              <div className="space-y-2 md:col-span-2">
+                <div className="text-xs text-white/50">URL</div>
+                <div className="text-sm text-white/85 break-all">{pack.source_url}</div>
+              </div>
 
-          {materials?.length ? (
-            <span className="badge">
-              <span className="muted2">Items</span>&nbsp; <span className="mono">{materials.length}</span>
-            </span>
-          ) : (
-            <span className="badge subtle">No materials yet</span>
+              <div className="space-y-2">
+                <div className="text-xs text-white/50">Status</div>
+                <div className="text-sm text-white/90">{pack.status}</div>
+              </div>
+            </div>
           )}
-        </div>
+        </GlassCard>
 
-        <div className="tabs">
-          {(Object.keys(TAB_LABELS) as TabKey[]).map((k) => (
-            <button
-              key={k}
-              className={`tab ${tab === k ? "active" : ""}`}
-              onClick={() => setTab(k)}
-              disabled={loading}
-            >
-              {TAB_LABELS[k]}
-            </button>
-          ))}
-        </div>
+        <GlassCard
+          title="Materials"
+          right={<span className="text-white/60">Items: {(materials || []).length}</span>}
+        >
+          {!materials?.length ? (
+            <div className="text-sm text-white/70">
+              No materials found for this pack yet. Click{" "}
+              <span className="text-white font-semibold">Generate materials</span>.
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <PillTabs active={tab} onChange={setTab} counts={counts} />
 
-        <div className="sep" />
-
-        {!materials?.length ? (
-          <div className="muted" style={{ lineHeight: 1.75 }}>
-            Click <b>Generate materials</b> to create summary, takeaways, chapters, flashcards, and quiz for this pack.
-          </div>
-        ) : (
-          <>
-            {/* Per-material error banner if present */}
-            {current?.error && (
-              <div className="alert" style={{ marginBottom: 12 }}>
-                <strong>Note:</strong> {current.error}
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
+                {currentMaterial ? (
+                  <RenderMaterial m={currentMaterial} />
+                ) : (
+                  <div className="text-sm text-white/60">No data for this tab.</div>
+                )}
               </div>
-            )}
-            {renderTab(current, tab)}
-          </>
-        )}
-      </section>
+            </div>
+          )}
+        </GlassCard>
+      </div>
     </main>
   );
 }
