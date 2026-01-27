@@ -11,99 +11,68 @@ from app.models.study_material import StudyMaterial
 from app.models.study_pack import StudyPack
 
 
-# -----------------------------
-# Public helpers
-# -----------------------------
+# ----------------------------
+# Text helpers
+# ----------------------------
 
-def material_text(kind: str, payload: Any) -> str | None:
-    """
-    Create a text fallback for UI/search even if payload is JSON.
-    Keep it simple and deterministic for V0.
-    """
-    if payload is None:
+def material_text(kind: str, payload: dict) -> str | None:
+    """Create a text fallback for UI/search even if payload is JSON."""
+    if not payload:
         return None
 
-    # If someone accidentally passes a JSON string, try to parse it.
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except Exception:
-            # If it's just raw text, for summary we can return it
-            if kind == "summary":
-                return payload.strip() or None
-            return payload.strip() or None
-
-    if not isinstance(payload, dict):
-        # Unexpected shape, best-effort stringify.
-        s = str(payload).strip()
-        return s or None
-
     if kind == "summary":
-        # payload: {"text": "..."}
-        text = payload.get("text")
-        return str(text).strip() if text else None
+        return payload.get("text")
 
     if kind == "key_takeaways":
-        # payload: {"items": ["...", "..."]}
         items = payload.get("items") or []
-        if not items:
-            return None
-        return "\n".join([f"- {str(x).strip()}" for x in items if str(x).strip()]) or None
+        items = [str(x).strip() for x in items if str(x).strip()]
+        return "\n".join([f"- {x}" for x in items]) if items else None
 
     if kind == "chapters":
-        # payload: {"items":[{"title":..., "summary":...}, ...]}
         items = payload.get("items") or []
         if not items:
             return None
         lines: list[str] = []
         for ch in items:
-            if not isinstance(ch, dict):
-                continue
             title = ch.get("title")
             summ = ch.get("summary")
             if title:
-                lines.append(str(title).strip())
+                lines.append(str(title))
             if summ:
-                lines.append(str(summ).strip())
-            lines.append("")  # spacer
+                lines.append(str(summ))
+            lines.append("")
         text = "\n".join(lines).strip()
         return text or None
 
     if kind == "flashcards":
-        # payload: {"items":[{"q":..., "a":...}, ...]}
         items = payload.get("items") or []
         if not items:
             return None
         lines: list[str] = []
         for i, fc in enumerate(items, start=1):
-            if not isinstance(fc, dict):
-                continue
             q = fc.get("q")
             a = fc.get("a")
             if q:
-                lines.append(f"Q{i}. {str(q).strip()}")
+                lines.append(f"Q{i}. {q}")
             if a:
-                lines.append(f"A{i}. {str(a).strip()}")
+                lines.append(f"A{i}. {a}")
             lines.append("")
         text = "\n".join(lines).strip()
         return text or None
 
     if kind == "quiz":
-        # payload: {"items":[{"question":..., "options":[...], "answer_index":...}, ...]}
         items = payload.get("items") or []
         if not items:
             return None
         lines: list[str] = []
         for i, q in enumerate(items, start=1):
-            if not isinstance(q, dict):
-                continue
             question = q.get("question")
             options = q.get("options") or []
             answer_index = q.get("answer_index")
             if question:
-                lines.append(f"Q{i}. {str(question).strip()}")
+                lines.append(f"Q{i}. {question}")
             for j, opt in enumerate(options, start=1):
-                lines.append(f"  {j}) {str(opt).strip()}")
+                lines.append(f"  {j}) {opt}")
             if isinstance(answer_index, int) and 0 <= answer_index < len(options):
                 lines.append(f"Answer: {answer_index + 1}")
             lines.append("")
@@ -113,93 +82,240 @@ def material_text(kind: str, payload: Any) -> str | None:
     return None
 
 
+_STAGE_DIR_RE = re.compile(
+    r"""\[
+        (?:\s*music\s*|\s*laughter\s*|\s*applause\s*|\s*inaudible\s*|\s*silence\s*|[^\]]{1,40})
+    \]""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _dedupe_consecutive_ngrams(words: list[str], n: int) -> list[str]:
+    """Collapse immediate repetitions like: A B C A B C ... by skipping repeated n-grams."""
+    if n <= 1 or len(words) < n * 2:
+        return words
+
+    out: list[str] = []
+    i = 0
+    while i < len(words):
+        if len(out) >= n and i + n <= len(words) and out[-n:] == words[i : i + n]:
+            i += n
+            continue
+        out.append(words[i])
+        i += 1
+    return out
+
+
 def _clean_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text or "").strip()
+    """Normalize transcript text for downstream material generation.
+
+    Key goals:
+    - Remove common stage directions like [Music], [Laughter]
+    - Collapse extreme whitespace/newlines
+    - Reduce common back-to-back repetition caused by noisy captions
+    """
+    s = (text or "").strip()
+    if not s:
+        return ""
+
+    # Remove stage directions (best-effort)
+    s = _STAGE_DIR_RE.sub(" ", s)
+
+    # Normalize whitespace
+    s = re.sub(r"\s+", " ", s).strip()
+
+    # Light de-duplication for repeated captions (run a few n-gram passes)
+    words = s.split()
+    for n in (12, 10, 8, 6):
+        words = _dedupe_consecutive_ngrams(words, n)
+    s = " ".join(words)
+
+    # Final whitespace normalize
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _chunk_words(text: str, chunk_words: int = 28) -> list[str]:
+    words = [w for w in (text or "").split() if w]
+    if not words:
+        return []
+    return [" ".join(words[i : i + chunk_words]).strip() for i in range(0, len(words), chunk_words)]
 
 
 def _simple_sentence_split(text: str) -> list[str]:
+    """Make a 'sentence-like' list from transcript.
+
+    Many YouTube transcripts have *no punctuation*, so a punctuation-only split collapses
+    to a single mega string, which then causes every material type to look identical.
+    """
     text = _clean_text(text)
     if not text:
         return []
+
+    # Punctuation-based split
     parts = re.split(r"(?<=[.!?])\s+", text)
-    return [p.strip() for p in parts if p.strip()]
+    parts = [p.strip() for p in parts if p.strip()]
+
+    # Fallback if punctuation missing / too few parts
+    if len(parts) < 6:
+        parts = _chunk_words(text, chunk_words=28)
+
+    # Remove ultra-short fragments
+    parts = [p for p in parts if len(p.split()) >= 6]
+    return parts
 
 
-# -----------------------------
-# Payload generation (V0)
-# -----------------------------
+def _pick_evenly(items: list[str], k: int) -> list[str]:
+    if not items or k <= 0:
+        return []
+    if len(items) <= k:
+        return items
+    idxs = [round(i * (len(items) - 1) / (k - 1)) for i in range(k)]
+    out: list[str] = []
+    seen = set()
+    for ix in idxs:
+        s = items[int(ix)]
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out[:k]
+
+
+# ----------------------------
+# Heuristic V0 generator
+# ----------------------------
 
 def generate_materials_payload_heuristic(transcript_text: str) -> dict[str, Any]:
-    """
-    Deterministic V0 generator (no LLM).
-    """
+    """Deterministic generator that produces *distinct* materials even for no-punct transcripts."""
     text = _clean_text(transcript_text)
     sents = _simple_sentence_split(text)
 
-    summary = " ".join(sents[:3]) if sents else (text[:400] if text else "")
-    if not summary and text:
-        summary = text[:400]
-
-    key_takeaways: list[str] = []
+    # SUMMARY: spread across transcript (begin + middle + end)
     if sents:
-        key_takeaways = sents[:5]
-    elif text:
-        key_takeaways = [text[:120]]
+        picks = _pick_evenly(sents, k=3)
+        summary = " ".join(picks).strip()
+    else:
+        summary = (text[:500] if text else "").strip()
 
-    chapters = []
-    chunk_size = 6
-    for i in range(0, len(sents), chunk_size):
-        chunk = sents[i : i + chunk_size]
-        if not chunk:
-            continue
-        chapters.append(
-            {
-                "title": f"Chapter {len(chapters) + 1}",
-                "summary": " ".join(chunk[:2]),
-                "sentences": chunk,
-            }
-        )
+    # TAKEAWAYS: 6 evenly spread lines
+    takeaways = _pick_evenly(sents, k=6) if sents else []
+    takeaways = [t.strip() for t in takeaways if t.strip()]
 
-    flashcards = []
-    for i, t in enumerate(key_takeaways[:10]):
-        flashcards.append(
-            {
-                "q": f"What is one key point from the transcript? (#{i+1})",
-                "a": t,
-            }
-        )
+    # CHAPTERS: group into 4–6 chapters depending on length
+    chapters: list[dict[str, Any]] = []
+    if sents:
+        target_chapters = 6 if len(sents) >= 24 else 4
+        per = max(4, (len(sents) + target_chapters - 1) // target_chapters)
+        for i in range(0, len(sents), per):
+            chunk = sents[i : i + per]
+            if not chunk:
+                continue
+            chapters.append(
+                {
+                    "title": f"Chapter {len(chapters) + 1}",
+                    "summary": " ".join(chunk[:2]).strip(),
+                    "sentences": chunk,
+                }
+            )
 
-    quiz = []
-    for i, t in enumerate(key_takeaways[:5]):
+    # FLASHCARDS: derive Q/A from takeaways but keep answers short-ish
+    flashcards: list[dict[str, str]] = []
+    for i, t in enumerate(takeaways[:10], start=1):
+        ans = t.strip()
+        if len(ans) > 220:
+            ans = " ".join(ans.split()[:40]).strip() + "…"
+        flashcards.append({"q": f"Key idea #{i}", "a": ans})
+
+    # QUIZ: lightweight MCQ from takeaways
+    quiz: list[dict[str, Any]] = []
+    for i, t in enumerate(takeaways[:5], start=1):
+        correct = t.strip()
+        if len(correct) > 180:
+            correct = " ".join(correct.split()[:30]).strip() + "…"
         quiz.append(
             {
-                "question": f"Which of the following best matches a point made in the transcript? (#{i+1})",
-                "options": [t, "Not mentioned", "Opposite of transcript", "Unrelated detail"],
+                "question": f"Which statement matches the transcript? (Q{i})",
+                "options": [
+                    correct,
+                    "The transcript does not mention this",
+                    "This contradicts the transcript",
+                    "This is an unrelated detail",
+                ],
                 "answer_index": 0,
             }
         )
 
     return {
         "summary": {"text": summary},
-        "key_takeaways": {"items": key_takeaways},
+        "key_takeaways": {"items": takeaways},
         "chapters": {"items": chapters},
         "flashcards": {"items": flashcards},
         "quiz": {"items": quiz},
     }
 
 
-def generate_materials_payload(transcript_text: str) -> dict[str, Any]:
-    """
-    Official entrypoint used everywhere.
-    For now (V0), this is still heuristic-only.
-    Later you’ll switch this to OpenAI behind a feature flag.
-    """
-    return generate_materials_payload_heuristic(transcript_text)
+# ----------------------------
+# Guardrails
+# ----------------------------
+
+def _overlap_ratio(a: str, b: str) -> float:
+    """Cheap containment heuristic: token overlap ratio."""
+    a = _clean_text(a)
+    b = _clean_text(b)
+    if not a or not b:
+        return 0.0
+    if a in b:
+        return 1.0
+    a_tokens = set(a.lower().split())
+    b_tokens = set(b.lower().split())
+    if not a_tokens:
+        return 0.0
+    return len(a_tokens & b_tokens) / max(1, len(a_tokens))
 
 
-# -----------------------------
-# DB persistence
-# -----------------------------
+def validate_payload(transcript_text: str, payload: dict[str, Any], *, provider: str) -> dict[str, str]:
+    """Returns {kind: error_code} for failures. Empty dict = pass."""
+    errors: dict[str, str] = {}
+
+    transcript = _clean_text(transcript_text)
+    tlen = len(transcript)
+
+    summary_text = (payload.get("summary") or {}).get("text") or ""
+    summary_text = _clean_text(summary_text)
+
+    # Only enforce "synthesized" checks for LLM providers (heuristic is extractive by design)
+    if provider == "openai" and tlen > 600:
+        if len(summary_text) > 1200:
+            errors["summary"] = "summary_too_long"
+        elif _overlap_ratio(summary_text, transcript) > 0.75:
+            errors["summary"] = "summary_not_synthesized"
+
+    takeaways = ((payload.get("key_takeaways") or {}).get("items") or [])
+    takeaways = [str(x).strip() for x in takeaways if str(x).strip()]
+    if tlen > 400 and len(takeaways) < 5:
+        errors["key_takeaways"] = "takeaways_too_few"
+    if takeaways and any(len(x) > 260 for x in takeaways):
+        errors["key_takeaways"] = "takeaways_too_long"
+
+    chapters = ((payload.get("chapters") or {}).get("items") or [])
+    if tlen > 800 and len(chapters) < 2:
+        errors["chapters"] = "chapters_too_few"
+
+    flashcards = ((payload.get("flashcards") or {}).get("items") or [])
+    if tlen > 400 and len(flashcards) < 8:
+        errors["flashcards"] = "flashcards_too_few"
+
+    quiz = ((payload.get("quiz") or {}).get("items") or [])
+    if tlen > 400 and len(quiz) < 5:
+        errors["quiz"] = "quiz_too_few"
+
+    return errors
+
+
+# ----------------------------
+# DB upsert
+# ----------------------------
 
 def upsert_material(
     db: Session,
@@ -223,11 +339,14 @@ def upsert_material(
     m.content_json = json.dumps(content_json_obj) if content_json_obj is not None else None
     m.content_text = content_text
     m.error = error
-
     db.commit()
     db.refresh(m)
     return m
 
+
+# ----------------------------
+# Main entrypoint used by Celery task
+# ----------------------------
 
 def generate_and_store_all(db: Session, study_pack_id: int) -> None:
     sp = db.query(StudyPack).filter(StudyPack.id == study_pack_id).first()
@@ -237,20 +356,42 @@ def generate_and_store_all(db: Session, study_pack_id: int) -> None:
     if not sp.transcript_text:
         raise ValueError("StudyPack transcript_text is empty; ingest first.")
 
-    payload = generate_materials_payload(sp.transcript_text)
+    provider = os.getenv("STUDY_MATERIALS_PROVIDER", "heuristic").lower()
 
-    for kind in ["summary", "key_takeaways", "chapters", "flashcards", "quiz"]:
-        obj = payload.get(kind) or {}
-        txt = material_text(kind, obj)
-        upsert_material(
-            db=db,
-            study_pack_id=study_pack_id,
-            kind=kind,
-            status="generated",
-            content_json_obj=obj,
-            content_text=txt,
-            error=None,
-        )
-# Backward-compatible alias for callers / debug snippets
-generate_materials_payload = generate_materials_payload_heuristic  # noqa: F811
-        
+    if provider == "openai":
+        try:
+            # Lazy import to avoid import-time cycles and to keep heuristic mode lightweight.
+            from app.services.llm.openai_client import generate_study_materials_openai
+
+            payload = generate_study_materials_openai(sp.transcript_text)
+        except Exception:
+            # If OpenAI is misconfigured or fails, fallback so the pipeline still works.
+            provider = "heuristic"
+            payload = generate_materials_payload_heuristic(sp.transcript_text)
+    else:
+        payload = generate_materials_payload_heuristic(sp.transcript_text)
+
+    errs = validate_payload(sp.transcript_text, payload, provider=provider)
+
+    kinds = ["summary", "key_takeaways", "chapters", "flashcards", "quiz"]
+    for kind in kinds:
+        if kind in errs:
+            upsert_material(
+                db,
+                study_pack_id,
+                kind,
+                status="failed",
+                content_json_obj=payload.get(kind),
+                content_text=material_text(kind, payload.get(kind) or {}),
+                error=errs[kind],
+            )
+        else:
+            upsert_material(
+                db,
+                study_pack_id,
+                kind,
+                status="generated",
+                content_json_obj=payload.get(kind),
+                content_text=material_text(kind, payload.get(kind) or {}),
+                error=None,
+            )
