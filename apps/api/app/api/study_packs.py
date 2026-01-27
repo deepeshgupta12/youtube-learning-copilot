@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 
 from app.db.session import get_db
 from app.models.study_pack import StudyPack
@@ -33,6 +34,80 @@ class StudyPackFromYoutubeResponse(BaseModel):
     playlist_id: str | None = None
     playlist_title: str | None = None
     playlist_count: int | None = None
+
+
+@router.get("")
+def list_study_packs(
+    db: Session = Depends(get_db),
+    q: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    source_type: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    """
+    V1 Minimal Library:
+    - Recent study packs
+    - Search by title/url/id/playlist fields
+    - Optional filters (status, source_type)
+    - Pagination via limit/offset
+    """
+    query = db.query(StudyPack)
+
+    if status:
+        query = query.filter(StudyPack.status == status)
+
+    if source_type:
+        query = query.filter(StudyPack.source_type == source_type)
+
+    if q and q.strip():
+        s = f"%{q.strip()}%"
+        query = query.filter(
+            or_(
+                StudyPack.title.ilike(s),
+                StudyPack.source_url.ilike(s),
+                StudyPack.source_id.ilike(s),
+                StudyPack.playlist_title.ilike(s),
+                StudyPack.playlist_id.ilike(s),
+            )
+        )
+
+    total = query.count()
+
+    rows = (
+        query.order_by(StudyPack.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    packs = []
+    for sp in rows:
+        packs.append(
+            {
+                "id": sp.id,
+                "title": sp.title,
+                "source_type": sp.source_type,
+                "source_url": sp.source_url,
+                "status": sp.status,
+                "source_id": sp.source_id,
+                "language": sp.language,
+                "playlist_id": sp.playlist_id,
+                "playlist_title": sp.playlist_title,
+                "playlist_index": sp.playlist_index,
+                "error": sp.error,
+                "created_at": sp.created_at.isoformat() if sp.created_at else None,
+                "updated_at": sp.updated_at.isoformat() if sp.updated_at else None,
+            }
+        )
+
+    return {
+        "ok": True,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "packs": packs,
+    }
 
 
 @router.post("/from-youtube", response_model=StudyPackFromYoutubeResponse)
