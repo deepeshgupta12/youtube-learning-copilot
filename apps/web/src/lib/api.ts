@@ -63,29 +63,48 @@ export type GenerateMaterialsResponse = {
 
 function baseUrl(): string {
   const v = process.env.NEXT_PUBLIC_API_BASE_URL;
-  return (v && v.trim()) ? v.trim().replace(/\/+$/, "") : "http://localhost:8000";
+  return v && v.trim() ? v.trim().replace(/\/+$/, "") : "http://localhost:8000";
+}
+
+type Json = Record<string, unknown> | unknown[] | string | number | boolean | null;
+
+function isJsonBody(body: any): boolean {
+  return typeof body === "string" || typeof body === "object";
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const url = `${baseUrl()}${path.startsWith("/") ? path : `/${path}`}`;
 
+  const method = (init?.method || "GET").toUpperCase();
+  const hasBody = init?.body !== undefined && init?.body !== null;
+
+  // Only send Content-Type when we have a JSON body.
+  // This avoids unnecessary CORS preflight for GET and body-less POST.
+  const headers: Record<string, string> = {
+    ...(init?.headers as Record<string, string> | undefined),
+  };
+
+  if (hasBody) {
+    // If caller passes string body, assume it's JSON string unless they overrode.
+    if (!headers["Content-Type"]) headers["Content-Type"] = "application/json";
+  }
+
   const res = await fetch(url, {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers || {}),
-    },
+    method,
+    headers,
     cache: "no-store",
   });
 
-  const text = await res.text();
-  let data: any = null;
+  // Some endpoints might return empty body (204 etc.)
+  const raw = await res.text();
 
+  let data: any = null;
   try {
-    data = text ? JSON.parse(text) : null;
+    data = raw ? JSON.parse(raw) : null;
   } catch {
-    // If backend ever returns non-json, keep raw text
-    data = { ok: false, error: text || `Non-JSON response from ${url}` };
+    // Non-JSON response fallback
+    data = { ok: false, error: raw || `Non-JSON response from ${url}` };
   }
 
   if (!res.ok) {
@@ -102,6 +121,8 @@ export async function createStudyPackFromYoutube(
   url: string,
   language?: string | null
 ): Promise<StudyPackFromYoutubeResponse> {
+  // This WILL still trigger preflight because it's JSON POST (normal).
+  // Backend must allow OPTIONS via CORS middleware.
   return apiFetch<StudyPackFromYoutubeResponse>("/study-packs/from-youtube", {
     method: "POST",
     body: JSON.stringify({ url, language: language || null }),
@@ -117,6 +138,7 @@ export async function getStudyPack(studyPackId: number): Promise<StudyPackRespon
 }
 
 export async function generateMaterials(studyPackId: number): Promise<GenerateMaterialsResponse> {
+  // Keep POST with no body => no Content-Type header => avoids preflight
   return apiFetch<GenerateMaterialsResponse>(`/study-packs/${studyPackId}/generate`, {
     method: "POST",
   });
