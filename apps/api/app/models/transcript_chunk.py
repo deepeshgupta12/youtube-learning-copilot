@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Column, Float, ForeignKey, Index, Integer, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Column, Float, ForeignKey, Index, Integer, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.db.base_class import Base
@@ -9,8 +9,14 @@ from app.db.base_class import Base
 class TranscriptChunk(Base):
     __tablename__ = "transcript_chunks"
 
-    id = Column(Integer, primary_key=True, index=True)
-    study_pack_id = Column(Integer, ForeignKey("study_packs.id", ondelete="CASCADE"), nullable=False)
+    id = Column(BigInteger, primary_key=True, index=True)
+
+    study_pack_id = Column(
+        BigInteger,
+        ForeignKey("study_packs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
 
     idx = Column(Integer, nullable=False)
     start_sec = Column(Float, nullable=False)
