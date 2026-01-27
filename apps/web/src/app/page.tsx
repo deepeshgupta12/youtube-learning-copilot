@@ -2,6 +2,7 @@
 
 // apps/web/src/app/page.tsx
 import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   createStudyPackFromYoutube,
   pollJobUntilDone,
@@ -16,6 +17,8 @@ function isLikelyYoutubeUrl(v: string): boolean {
 }
 
 export default function HomePage() {
+  const router = useRouter();
+
   const [url, setUrl] = useState<string>("");
   const [language, setLanguage] = useState<string>("en");
 
@@ -43,11 +46,17 @@ export default function HomePage() {
       const resp = await createStudyPackFromYoutube(u, language?.trim() || "en");
       setCreateResp(resp);
 
-      const finalJob = await pollJobUntilDone(resp.job_id, { intervalMs: 1200, timeoutMs: 120000 });
+      const finalJob = await pollJobUntilDone(resp.job_id, { intervalMs: 1200, timeoutMs: 180000 });
       setJob(finalJob);
 
       if (finalJob.status === "failed") {
         setErr(finalJob.error || "Job failed.");
+        return;
+      }
+
+      if (finalJob.status === "done") {
+        // Auto-open the pack page as soon as ingestion finishes.
+        router.push(`/packs/${resp.study_pack_id}`);
       }
     } catch (e: any) {
       setErr(e?.message || "Something went wrong.");
@@ -106,32 +115,47 @@ export default function HomePage() {
 
         {createResp && (
           <div style={{ padding: 12, borderRadius: 10, border: "1px solid rgba(0,0,0,0.12)" }}>
-            <div><strong>Study Pack ID:</strong> {createResp.study_pack_id}</div>
-            <div><strong>Video ID:</strong> {createResp.video_id}</div>
-            <div><strong>Job ID:</strong> {createResp.job_id}</div>
-            <div><strong>Task ID:</strong> {createResp.task_id}</div>
+            <div>
+              <strong>Study Pack ID:</strong> {createResp.study_pack_id}
+            </div>
+            <div>
+              <strong>Video ID:</strong> {createResp.video_id}
+            </div>
+            <div>
+              <strong>Job ID:</strong> {createResp.job_id}
+            </div>
+            <div>
+              <strong>Task ID:</strong> {createResp.task_id}
+            </div>
           </div>
         )}
 
         {job && (
           <div style={{ padding: 12, borderRadius: 10, border: "1px solid rgba(0,0,0,0.12)" }}>
-            <div><strong>Job Status:</strong> {job.status}</div>
-            {job.error && <div><strong>Job Error:</strong> {job.error}</div>}
+            <div>
+              <strong>Job Status:</strong> {job.status}
+            </div>
+            {job.error && (
+              <div>
+                <strong>Job Error:</strong> {job.error}
+              </div>
+            )}
 
+            {/* fallback link (in case you want manual control) */}
             {createResp && job.status === "done" && (
-              <a
-                href={`/packs/${createResp.study_pack_id}`}
+              <button
+                onClick={() => router.push(`/packs/${createResp.study_pack_id}`)}
                 style={{
-                  display: "inline-block",
                   marginTop: 10,
                   padding: "10px 14px",
                   borderRadius: 10,
                   border: "1px solid rgba(0,0,0,0.2)",
-                  textDecoration: "none",
+                  cursor: "pointer",
+                  width: 160,
                 }}
               >
                 Open Pack
-              </a>
+              </button>
             )}
           </div>
         )}
