@@ -27,6 +27,10 @@ class StudyPack(Base):
     transcript_json = Column(Text, nullable=True)
     transcript_text = Column(Text, nullable=True)
 
+    playlist_id = Column(String, nullable=True)
+    playlist_title = Column(String, nullable=True)
+    playlist_index = Column(Integer, nullable=True)
+
     error = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

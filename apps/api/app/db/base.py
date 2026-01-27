@@ -6,3 +6,4 @@ from app.models.user import User  # noqa: F401
 from app.models.job import Job  # noqa: F401
 from app.models.study_pack import StudyPack  # noqa: F401
 from app.models.study_material import StudyMaterial  # noqa: F401
+from app.models.transcript_chunk import TranscriptChunk  # noqa: F401

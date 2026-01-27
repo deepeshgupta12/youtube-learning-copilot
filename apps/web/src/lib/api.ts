@@ -15,7 +15,14 @@ export type StudyPackFromYoutubeResponse = {
   study_pack_id: number;
   job_id: number;
   task_id: string;
-  video_id: string;
+
+  // video
+  video_id?: string | null;
+
+  // playlist (optional)
+  playlist_id?: string | null;
+  playlist_title?: string | null;
+  playlist_count?: number | null;
 };
 
 export type StudyPackResponse = {
