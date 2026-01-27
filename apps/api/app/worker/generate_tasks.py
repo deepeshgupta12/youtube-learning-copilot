@@ -1,3 +1,4 @@
+# apps/api/app/worker/generate_tasks.py
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
@@ -37,11 +38,15 @@ def generate_study_materials(job_id: int, study_pack_id: int) -> dict:
         if sp.status != "ingested":
             raise ValueError(f"StudyPack not ingested yet (status={sp.status})")
 
-        merge_job_payload(db, job_id, {"progress": {"stage": "generate_and_store", "done": 0, "total": len(KINDS)}})
+        merge_job_payload(
+            db,
+            job_id,
+            {"progress": {"stage": "generate_and_store", "done": 0, "total": len(KINDS)}},
+        )
 
         # 4) Generate + store all 5 materials
-        # generate_and_store_all already handles openai->heuristic fallback and writes per-kind errors.
-        result_meta = generate_and_store_all(db, study_pack_id)
+        # generate_and_store_all handles openai->heuristic fallback and writes per-kind errors.
+        result_meta = generate_and_store_all(db, study_pack_id) or {}
 
         merge_job_payload(
             db,
@@ -63,7 +68,8 @@ def generate_study_materials(job_id: int, study_pack_id: int) -> dict:
 
         by_kind = {r.kind: r for r in rows}
         missing = [k for k in KINDS if k not in by_kind]
-        errors = []
+
+        errors: list[dict] = []
         for k in KINDS:
             r = by_kind.get(k)
             if not r:
@@ -101,7 +107,11 @@ def generate_study_materials(job_id: int, study_pack_id: int) -> dict:
         return {"ok": True, "job_id": job_id, "study_pack_id": study_pack_id}
 
     except Exception as e:
-        set_job_status(db, job_id, "failed", error=str(e))
+        err = str(e)
+        merge_job_payload(db, job_id, {"progress": {"stage": "failed"}, "error": err})
+        set_job_status(db, job_id, "failed", error=err)
+        # keep raise for celery visibility (your current behavior); if you want "no red celery trace",
+        # change this to `return {"ok": False, ...}` instead of raising.
         raise
     finally:
         db.close()

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
 from app.models.study_pack import StudyPack
 from app.models.transcript_chunk import TranscriptChunk
-from app.services.jobs import set_job_status
+from app.services.jobs import set_job_status, merge_job_payload
 from app.services.study_packs import set_ingested, set_failed
 import app.services.transcript as transcript
 from app.worker.celery_app import celery_app
@@ -86,18 +86,39 @@ def ingest_youtube_captions(job_id: int, study_pack_id: int, video_id: str, lang
     """
     db: Session = SessionLocal()
     try:
+        # 1) Mark job running + seed payload
         set_job_status(db, job_id, "running")
+        merge_job_payload(
+            db,
+            job_id,
+            {
+                "study_pack_id": study_pack_id,
+                "video_id": video_id,
+                "progress": {"stage": "fetch_transcript"},
+            },
+        )
 
+        # 2) Fetch transcript (captions -> ytdlp -> stt handled inside service)
         t = transcript.fetch_youtube_transcript(video_id, language=language)
 
-        # method: captions | ytdlp_subs | stt
         method = t.get("method") or "unknown"
         segments = t["segments"]
         text = t["text"]
 
+        merge_job_payload(
+            db,
+            job_id,
+            {
+                "method": method,
+                "progress": {"stage": "write_chunks"},
+            },
+        )
+
+        # 3) Write chunks
         chunks = _segments_to_chunks(segments)
         chunks_written = _replace_transcript_chunks(db, study_pack_id, chunks)
 
+        # 4) Mark study pack ingested
         meta = {
             "video_id": video_id,
             "provider": "youtube",
@@ -118,6 +139,15 @@ def ingest_youtube_captions(job_id: int, study_pack_id: int, video_id: str, lang
             language=t.get("language") or language,
         )
 
+        merge_job_payload(
+            db,
+            job_id,
+            {
+                "chunks_written": chunks_written,
+                "progress": {"stage": "done"},
+            },
+        )
+
         set_job_status(db, job_id, "done")
         return {
             "ok": True,
@@ -128,12 +158,17 @@ def ingest_youtube_captions(job_id: int, study_pack_id: int, video_id: str, lang
         }
 
     except transcript.TranscriptNotFound as e:
-        set_failed(db, study_pack_id, str(e))
-        set_job_status(db, job_id, "failed", error=str(e))
+        err = str(e)
+        set_failed(db, study_pack_id, err)
+        merge_job_payload(db, job_id, {"progress": {"stage": "failed"}, "error": err})
+        set_job_status(db, job_id, "failed", error=err)
+        # keep raise to show proper celery failure semantics for "not found"
         raise
     except Exception as e:
-        set_failed(db, study_pack_id, str(e))
-        set_job_status(db, job_id, "failed", error=str(e))
+        err = str(e)
+        set_failed(db, study_pack_id, err)
+        merge_job_payload(db, job_id, {"progress": {"stage": "failed"}, "error": err})
+        set_job_status(db, job_id, "failed", error=err)
         raise
     finally:
         db.close()
@@ -156,11 +191,23 @@ def ingest_youtube_playlist(
     db: Session = SessionLocal()
     failed: list[dict[str, Any]] = []
     done: int = 0
+    total = len(study_pack_ids)
 
     try:
         set_job_status(db, job_id, "running")
+        merge_job_payload(
+            db,
+            job_id,
+            {
+                "playlist_id": playlist_id,
+                "progress": {"stage": "start", "done": 0, "total": total},
+            },
+        )
 
-        for sp_id in study_pack_ids:
+        for i, sp_id in enumerate(study_pack_ids, start=1):
+            # Update progress every item (lightweight)
+            merge_job_payload(db, job_id, {"progress": {"stage": "ingesting", "done": i - 1, "total": total}})
+
             sp = db.query(StudyPack).filter(StudyPack.id == sp_id).first()
             if not sp:
                 failed.append({"study_pack_id": sp_id, "error": "StudyPack not found"})
@@ -210,6 +257,7 @@ def ingest_youtube_playlist(
                     language=t.get("language") or language,
                 )
                 done += 1
+
             except transcript.TranscriptNotFound as e:
                 set_failed(db, sp_id, str(e))
                 failed.append({"study_pack_id": sp_id, "error": str(e)})
@@ -217,9 +265,12 @@ def ingest_youtube_playlist(
                 set_failed(db, sp_id, str(e))
                 failed.append({"study_pack_id": sp_id, "error": str(e)})
 
+            # Keep progress moving
+            merge_job_payload(db, job_id, {"progress": {"stage": "ingesting", "done": i, "total": total}})
+
         summary = {
             "playlist_id": playlist_id,
-            "total": len(study_pack_ids),
+            "total": total,
             "ingested": done,
             "failed_count": len(failed),
             "failed": failed[:200],  # cap to avoid huge job payloads
@@ -228,11 +279,17 @@ def ingest_youtube_playlist(
         # IMPORTANT: job is "done" even if partial failures
         msg = None
         if failed:
-            msg = f"done_with_errors: failed={len(failed)}/{len(study_pack_ids)}"
+            msg = f"done_with_errors: failed={len(failed)}/{total}"
 
-        set_job_status(db, job_id, "done", error=msg, payload=summary)
+        merge_job_payload(db, job_id, {"summary": summary, "progress": {"stage": "done", "done": total, "total": total}})
+        set_job_status(db, job_id, "done", error=msg)
 
         return {"ok": True, "job_id": job_id, **summary}
 
+    except Exception as e:
+        err = str(e)
+        merge_job_payload(db, job_id, {"progress": {"stage": "failed"}, "error": err})
+        set_job_status(db, job_id, "failed", error=err)
+        raise
     finally:
         db.close()
