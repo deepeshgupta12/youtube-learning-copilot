@@ -7,11 +7,23 @@ from app.db.session import get_db
 from app.api.jobs import router as jobs_router
 from app.api.study_packs import router as study_packs_router
 from app.api.study_materials import router as study_materials_router
+from fastapi.middleware.cors import CORSMiddleware
+
 
 app = FastAPI(title="YouTube Learning Copilot API", version="0.0.1")
 app.include_router(jobs_router)
 app.include_router(study_packs_router)
 app.include_router(study_materials_router)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class HealthResponse(BaseModel):
