@@ -67,6 +67,13 @@ def ingest_youtube_playlist(
                 failed.append({"study_pack_id": sp_id, "error": "StudyPack not found"})
                 continue
 
+            # Fail-fast: yt-dlp marks these as [Private video] / [Deleted video]
+            if (sp.title or "").strip().lower() in ["[private video]", "[deleted video]"]:
+                msg = f"{sp.title} (skipped)"
+                set_failed(db, sp_id, msg)
+                failed.append({"study_pack_id": sp_id, "error": msg})
+                continue
+
             video_id = sp.source_id
             if not video_id:
                 failed.append({"study_pack_id": sp_id, "error": "Missing source_id/video_id"})
@@ -79,7 +86,7 @@ def ingest_youtube_playlist(
                 set_ingested(
                     db,
                     sp_id,
-                    title=sp.title,  # keep whatever we set at creation time
+                    title=sp.title,
                     meta=meta,
                     transcript_segments=t["segments"],
                     transcript_text=t["text"],
@@ -93,17 +100,20 @@ def ingest_youtube_playlist(
                 set_failed(db, sp_id, str(e))
                 failed.append({"study_pack_id": sp_id, "error": str(e)})
 
+        # Terminalize job as DONE always; store summary in error field if needed
+        summary = f"playlist ingestion finished: total={len(study_pack_ids)}, ingested={done}, failed={len(failed)}"
         if failed:
-            set_job_status(db, job_id, "failed", error=f"{len(failed)} pack(s) failed in playlist ingestion.")
+            set_job_status(db, job_id, "done", error=summary)
         else:
-            set_job_status(db, job_id, "done")
+            set_job_status(db, job_id, "done", error=None)
 
         return {
-            "ok": len(failed) == 0,
+            "ok": True,  # job completed (not “all succeeded”)
             "job_id": job_id,
             "playlist_id": playlist_id,
             "total": len(study_pack_ids),
-            "done": done,
+            "ingested": done,
+            "failed_count": len(failed),
             "failed": failed,
         }
     finally:
