@@ -1,6 +1,5 @@
 "use client";
 
-// apps/web/src/app/page.tsx
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
@@ -14,6 +13,12 @@ function isLikelyYoutubeUrl(v: string): boolean {
   const s = (v || "").trim();
   if (!s) return false;
   return s.includes("youtube.com/") || s.includes("youtu.be/");
+}
+
+function shortId(id?: string | null): string {
+  if (!id) return "-";
+  if (id.length <= 10) return id;
+  return `${id.slice(0, 6)}…${id.slice(-4)}`;
 }
 
 export default function HomePage() {
@@ -55,7 +60,6 @@ export default function HomePage() {
       }
 
       if (finalJob.status === "done") {
-        // Auto-open the pack page as soon as ingestion finishes.
         router.push(`/packs/${resp.study_pack_id}`);
       }
     } catch (e: any) {
@@ -66,100 +70,137 @@ export default function HomePage() {
   }
 
   return (
-    <main style={{ padding: 24, maxWidth: 860, margin: "0 auto" }}>
-      <h1 style={{ marginBottom: 6 }}>YouTube Learning Copilot</h1>
-      <p style={{ marginTop: 0, opacity: 0.75 }}>
-        Create a study pack from a YouTube video, ingest transcript, then generate study materials.
-      </p>
-
-      <div style={{ display: "grid", gap: 12, marginTop: 18 }}>
-        <label style={{ display: "grid", gap: 6 }}>
-          <span>YouTube URL</span>
-          <input
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://www.youtube.com/watch?v=..."
-            style={{ padding: 10, borderRadius: 8, border: "1px solid rgba(0,0,0,0.15)" }}
-          />
-        </label>
-
-        <label style={{ display: "grid", gap: 6, maxWidth: 220 }}>
-          <span>Language</span>
-          <input
-            value={language}
-            onChange={(e) => setLanguage(e.target.value)}
-            placeholder="en"
-            style={{ padding: 10, borderRadius: 8, border: "1px solid rgba(0,0,0,0.15)" }}
-          />
-        </label>
-
-        <button
-          onClick={onCreate}
-          disabled={!canSubmit}
-          style={{
-            padding: "10px 14px",
-            borderRadius: 10,
-            border: "1px solid rgba(0,0,0,0.2)",
-            cursor: canSubmit ? "pointer" : "not-allowed",
-            width: 260,
-          }}
-        >
-          {creating ? "Creating + Ingesting..." : "Create Study Pack"}
-        </button>
-
-        {err && (
-          <div style={{ padding: 12, borderRadius: 10, border: "1px solid rgba(255,0,0,0.3)" }}>
-            <strong>Error:</strong> {err}
-          </div>
-        )}
-
-        {createResp && (
-          <div style={{ padding: 12, borderRadius: 10, border: "1px solid rgba(0,0,0,0.12)" }}>
+    <main style={{ marginTop: 18 }}>
+      {/* HERO */}
+      <section className="glass card">
+        <div style={{ display: "grid", gap: 10 }}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
             <div>
-              <strong>Study Pack ID:</strong> {createResp.study_pack_id}
+              <h1 style={{ margin: 0, fontSize: 30, letterSpacing: "-0.03em" }}>Turn YouTube into a study pack</h1>
+              <p style={{ margin: "6px 0 0", color: "var(--muted)" }}>
+                Ingest transcript → Generate summary, takeaways, chapters, flashcards, and quiz.
+              </p>
             </div>
-            <div>
-              <strong>Video ID:</strong> {createResp.video_id}
-            </div>
-            <div>
-              <strong>Job ID:</strong> {createResp.job_id}
-            </div>
-            <div>
-              <strong>Task ID:</strong> {createResp.task_id}
+            <div className="row">
+              <span className="badge">
+                <span className="mono">/study-packs/from-youtube</span>
+              </span>
+              <span className="badge">
+                <span className="mono">/study-packs/:id/generate</span>
+              </span>
             </div>
           </div>
-        )}
 
-        {job && (
-          <div style={{ padding: 12, borderRadius: 10, border: "1px solid rgba(0,0,0,0.12)" }}>
-            <div>
-              <strong>Job Status:</strong> {job.status}
-            </div>
-            {job.error && (
-              <div>
-                <strong>Job Error:</strong> {job.error}
+          <div className="sep" />
+
+          <div className="grid-2">
+            <div style={{ display: "grid", gap: 10 }}>
+              <label style={{ display: "grid", gap: 6 }}>
+                <span className="muted">YouTube URL</span>
+                <input
+                  className="input"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  placeholder="https://www.youtube.com/watch?v=..."
+                />
+              </label>
+
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <label style={{ display: "grid", gap: 6, width: 220 }}>
+                  <span className="muted">Language</span>
+                  <input
+                    className="input"
+                    value={language}
+                    onChange={(e) => setLanguage(e.target.value)}
+                    placeholder="en"
+                  />
+                </label>
+
+                <div className="row">
+                  <button className="btn ghost" onClick={() => setUrl("")} disabled={creating}>
+                    Clear
+                  </button>
+                  <button className="btn primary" onClick={onCreate} disabled={!canSubmit}>
+                    {creating ? "Creating + ingesting…" : "Create study pack"}
+                  </button>
+                </div>
               </div>
-            )}
 
-            {/* fallback link (in case you want manual control) */}
-            {createResp && job.status === "done" && (
-              <button
-                onClick={() => router.push(`/packs/${createResp.study_pack_id}`)}
-                style={{
-                  marginTop: 10,
-                  padding: "10px 14px",
-                  borderRadius: 10,
-                  border: "1px solid rgba(0,0,0,0.2)",
-                  cursor: "pointer",
-                  width: 160,
-                }}
-              >
-                Open Pack
+              {err && (
+                <div className="alert">
+                  <strong>Error:</strong> {err}
+                </div>
+              )}
+            </div>
+
+            <div className="glass card" style={{ background: "rgba(255,255,255,0.05)", boxShadow: "var(--shadow2)" }}>
+              <div className="card-title">What you get</div>
+              <div className="muted" style={{ display: "grid", gap: 10, lineHeight: 1.6 }}>
+                <div>• A clean summary (not a transcript dump)</div>
+                <div>• Key takeaways (high signal)</div>
+                <div>• Chapters (structured learning path)</div>
+                <div>• Flashcards (memory reinforcement)</div>
+                <div>• Quiz (quick self-test)</div>
+              </div>
+              <div className="sep" />
+              <div className="muted2" style={{ lineHeight: 1.6 }}>
+                Tip: keep language as <span className="mono">en</span> unless you ingested captions in another language.
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* STATUS */}
+      {(createResp || job) && (
+        <section className="glass card" style={{ marginTop: 14 }}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <div className="card-title" style={{ marginBottom: 0 }}>
+              Ingestion status
+            </div>
+            {createResp?.study_pack_id && (
+              <button className="btn" onClick={() => router.push(`/packs/${createResp.study_pack_id}`)}>
+                Open pack
               </button>
             )}
           </div>
-        )}
-      </div>
+
+          <div className="sep" />
+
+          {createResp && (
+            <div style={{ display: "grid", gap: 6 }}>
+              <div className="kv">
+                <b>Study pack</b>
+                <span className="mono">#{createResp.study_pack_id}</span>
+              </div>
+              <div className="kv">
+                <b>Video</b>
+                <span className="mono">{createResp.video_id}</span>
+              </div>
+              <div className="kv">
+                <b>Job</b>
+                <span className="mono">#{createResp.job_id}</span>
+              </div>
+              <div className="kv">
+                <b>Task</b>
+                <span className="mono">{shortId(createResp.task_id)}</span>
+              </div>
+            </div>
+          )}
+
+          {job && (
+            <>
+              <div className="sep" />
+              <div className="row">
+                <span className="badge">
+                  <span className="muted2">Status</span>&nbsp; <span className="mono">{job.status}</span>
+                </span>
+                {job.error && <span className="badge" style={{ borderColor: "rgba(255,120,120,0.4)" }}>{job.error}</span>}
+              </div>
+            </>
+          )}
+        </section>
+      )}
     </main>
   );
 }

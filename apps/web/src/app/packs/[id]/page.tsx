@@ -1,6 +1,6 @@
 "use client";
 
-// apps/web/src/app/packs/[id]/page.tsx
+import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -13,7 +13,6 @@ import {
   type StudyMaterialsResponse,
   type StudyPackResponse,
 } from "../../../lib/api";
-import Link from "next/link";
 
 function toInt(v: unknown): number | null {
   const s = typeof v === "string" ? v : Array.isArray(v) ? v[0] : "";
@@ -21,109 +20,150 @@ function toInt(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function MaterialSection({ title, children }: { title: string; children: any }) {
+type TabKey = "summary" | "key_takeaways" | "chapters" | "flashcards" | "quiz";
+
+const TAB_LABELS: Record<TabKey, string> = {
+  summary: "Summary",
+  key_takeaways: "Key takeaways",
+  chapters: "Chapters",
+  flashcards: "Flashcards",
+  quiz: "Quiz",
+};
+
+function byKind(materials: StudyMaterialRow[] | null, kind: TabKey): StudyMaterialRow | null {
+  if (!materials?.length) return null;
+  return materials.find((m) => m.kind === kind) || null;
+}
+
+function shortUrl(u?: string | null): string {
+  if (!u) return "-";
+  if (u.length <= 70) return u;
+  return `${u.slice(0, 50)}…${u.slice(-16)}`;
+}
+
+function MetaLine({ label, value }: { label: string; value: any }) {
   return (
-    <section style={{ marginTop: 18, padding: 14, borderRadius: 12, border: "1px solid rgba(255,255,255,0.12)" }}>
-      <h2 style={{ marginTop: 0, marginBottom: 10, fontSize: 18 }}>{title}</h2>
-      {children}
-    </section>
+    <div className="kv">
+      <b>{label}</b>
+      <span className="muted" style={{ wordBreak: "break-word" }}>
+        {value}
+      </span>
+    </div>
   );
 }
 
-function renderMaterial(m: StudyMaterialRow) {
-  const kind = m.kind;
+function renderSummary(m: StudyMaterialRow) {
+  const text = m.content_text || (m.content_json as any)?.text || "";
+  if (!text) return <div className="muted">No summary found.</div>;
+  return <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.75 }}>{text}</div>;
+}
 
-  if (kind === "summary") {
-    const text = m.content_text || (m.content_json as any)?.text || "";
-    return <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{text}</div>;
-  }
+function renderTakeaways(m: StudyMaterialRow) {
+  const items: string[] = ((m.content_json as any)?.items || []) as string[];
+  if (!items?.length) return <div className="muted">No takeaways found.</div>;
+  return (
+    <ul style={{ marginTop: 0, lineHeight: 1.75 }}>
+      {items.map((t, i) => (
+        <li key={i} style={{ marginBottom: 8 }}>
+          {t}
+        </li>
+      ))}
+    </ul>
+  );
+}
 
-  if (kind === "key_takeaways") {
-    const items: string[] = ((m.content_json as any)?.items || []) as string[];
-    if (!items?.length) return <div style={{ opacity: 0.75 }}>No takeaways found.</div>;
-    return (
-      <ul style={{ marginTop: 0 }}>
-        {items.map((t, i) => (
-          <li key={i} style={{ marginBottom: 6, lineHeight: 1.5 }}>
-            {t}
-          </li>
-        ))}
-      </ul>
-    );
-  }
+function renderChapters(m: StudyMaterialRow) {
+  const items: any[] = ((m.content_json as any)?.items || []) as any[];
+  if (!items?.length) return <div className="muted">No chapters found.</div>;
 
-  if (kind === "chapters") {
-    const items: any[] = ((m.content_json as any)?.items || []) as any[];
-    if (!items?.length) return <div style={{ opacity: 0.75 }}>No chapters found.</div>;
-
-    return (
-      <div style={{ display: "grid", gap: 12 }}>
-        {items.map((ch, i) => (
-          <div key={i} style={{ padding: 12, borderRadius: 10, border: "1px solid rgba(255,255,255,0.12)" }}>
-            <div style={{ fontWeight: 700 }}>{ch?.title || `Chapter ${i + 1}`}</div>
-            {ch?.summary && <div style={{ marginTop: 6, opacity: 0.85, lineHeight: 1.5 }}>{ch.summary}</div>}
-            {Array.isArray(ch?.sentences) && ch.sentences.length > 0 && (
-              <details style={{ marginTop: 10 }}>
-                <summary style={{ cursor: "pointer" }}>Sentences</summary>
-                <ul>
-                  {ch.sentences.map((s: string, j: number) => (
-                    <li key={j} style={{ marginBottom: 6, lineHeight: 1.5 }}>
-                      {s}
-                    </li>
-                  ))}
-                </ul>
-              </details>
-            )}
+  return (
+    <div style={{ display: "grid", gap: 12 }}>
+      {items.map((ch, i) => (
+        <div key={i} className="glass card" style={{ background: "rgba(255,255,255,0.05)", boxShadow: "var(--shadow2)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
+            <div style={{ fontWeight: 800, letterSpacing: "-0.01em" }}>{ch?.title || `Chapter ${i + 1}`}</div>
+            <span className="badge subtle">
+              <span className="muted2">#{i + 1}</span>
+            </span>
           </div>
-        ))}
-      </div>
-    );
-  }
+          {ch?.summary && <div className="muted" style={{ marginTop: 8, lineHeight: 1.75 }}>{ch.summary}</div>}
 
-  if (kind === "flashcards") {
-    const items: any[] = ((m.content_json as any)?.items || []) as any[];
-    if (!items?.length) return <div style={{ opacity: 0.75 }}>No flashcards found.</div>;
+          {Array.isArray(ch?.sentences) && ch.sentences.length > 0 && (
+            <details style={{ marginTop: 10 }}>
+              <summary style={{ cursor: "pointer" }} className="muted">
+                Show transcript snippets
+              </summary>
+              <ul style={{ marginTop: 10, lineHeight: 1.75 }}>
+                {ch.sentences.map((s: string, j: number) => (
+                  <li key={j} style={{ marginBottom: 8 }}>
+                    {s}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
 
-    return (
-      <div style={{ display: "grid", gap: 10 }}>
-        {items.map((fc, i) => (
-          <div key={i} style={{ padding: 12, borderRadius: 10, border: "1px solid rgba(255,255,255,0.12)" }}>
-            <div style={{ fontWeight: 700 }}>Q{i + 1}. {fc?.q}</div>
-            <div style={{ marginTop: 8, opacity: 0.9, lineHeight: 1.5 }}>A{i + 1}. {fc?.a}</div>
+function renderFlashcards(m: StudyMaterialRow) {
+  const items: any[] = ((m.content_json as any)?.items || []) as any[];
+  if (!items?.length) return <div className="muted">No flashcards found.</div>;
+
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      {items.map((fc, i) => (
+        <div key={i} className="glass card" style={{ background: "rgba(255,255,255,0.05)", boxShadow: "var(--shadow2)" }}>
+          <div style={{ fontWeight: 800, letterSpacing: "-0.01em" }}>
+            Q{i + 1}. {fc?.q}
           </div>
-        ))}
-      </div>
-    );
-  }
-
-  if (kind === "quiz") {
-    const items: any[] = ((m.content_json as any)?.items || []) as any[];
-    if (!items?.length) return <div style={{ opacity: 0.75 }}>No quiz found.</div>;
-
-    return (
-      <div style={{ display: "grid", gap: 10 }}>
-        {items.map((q, i) => (
-          <div key={i} style={{ padding: 12, borderRadius: 10, border: "1px solid rgba(255,255,255,0.12)" }}>
-            <div style={{ fontWeight: 700, lineHeight: 1.4 }}>{i + 1}. {q?.question}</div>
-            <ol style={{ marginTop: 8 }}>
-              {(q?.options || []).map((opt: string, j: number) => (
-                <li key={j} style={{ marginBottom: 6, lineHeight: 1.5 }}>
-                  {opt}
-                </li>
-              ))}
-            </ol>
-            {typeof q?.answer_index === "number" && (
-              <div style={{ marginTop: 6, opacity: 0.85 }}>
-                Answer: {q.answer_index + 1}
-              </div>
-            )}
+          <div className="muted" style={{ marginTop: 10, lineHeight: 1.75 }}>
+            A{i + 1}. {fc?.a}
           </div>
-        ))}
-      </div>
-    );
-  }
+        </div>
+      ))}
+    </div>
+  );
+}
 
-  return <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(m.content_json, null, 2)}</pre>;
+function renderQuiz(m: StudyMaterialRow) {
+  const items: any[] = ((m.content_json as any)?.items || []) as any[];
+  if (!items?.length) return <div className="muted">No quiz found.</div>;
+
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      {items.map((q, i) => (
+        <div key={i} className="glass card" style={{ background: "rgba(255,255,255,0.05)", boxShadow: "var(--shadow2)" }}>
+          <div style={{ fontWeight: 800, letterSpacing: "-0.01em", lineHeight: 1.45 }}>
+            {i + 1}. {q?.question}
+          </div>
+          <ol style={{ marginTop: 10, lineHeight: 1.75 }}>
+            {(q?.options || []).map((opt: string, j: number) => (
+              <li key={j} style={{ marginBottom: 8 }}>
+                {opt}
+              </li>
+            ))}
+          </ol>
+          {typeof q?.answer_index === "number" && (
+            <div className="badge" style={{ marginTop: 10 }}>
+              <span className="muted2">Answer</span>&nbsp; <span className="mono">{q.answer_index + 1}</span>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function renderTab(m: StudyMaterialRow | null, tab: TabKey) {
+  if (!m) return <div className="muted">No material generated for this section yet.</div>;
+  if (tab === "summary") return renderSummary(m);
+  if (tab === "key_takeaways") return renderTakeaways(m);
+  if (tab === "chapters") return renderChapters(m);
+  if (tab === "flashcards") return renderFlashcards(m);
+  return renderQuiz(m);
 }
 
 export default function PackPage() {
@@ -132,10 +172,14 @@ export default function PackPage() {
 
   const [pack, setPack] = useState<StudyPackResponse["study_pack"] | null>(null);
   const [materials, setMaterials] = useState<StudyMaterialRow[] | null>(null);
+
   const [loading, setLoading] = useState<boolean>(true);
   const [running, setRunning] = useState<boolean>(false);
+
   const [lastJob, setLastJob] = useState<JobGetResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
+
+  const [tab, setTab] = useState<TabKey>("summary");
 
   async function refreshAll() {
     if (!studyPackId) return;
@@ -160,7 +204,7 @@ export default function PackPage() {
     setLastJob(null);
     try {
       const r = await generateMaterials(studyPackId);
-      const job = await pollJobUntilDone(r.job_id, { timeoutMs: 120_000, intervalMs: 1200 });
+      const job = await pollJobUntilDone(r.job_id, { timeoutMs: 180_000, intervalMs: 1200 });
       setLastJob(job);
       await refreshAll();
     } catch (e: any) {
@@ -175,55 +219,131 @@ export default function PackPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [studyPackId]);
 
-  if (!studyPackId) return <div style={{ padding: 24 }}>Invalid pack id.</div>;
+  if (!studyPackId) {
+    return (
+      <main style={{ marginTop: 18 }}>
+        <section className="glass card">
+          <div className="card-title">Invalid pack id</div>
+          <Link className="btn" href="/">Go home</Link>
+        </section>
+      </main>
+    );
+  }
+
+  const current = byKind(materials, tab);
 
   return (
-    <main style={{ maxWidth: 820, margin: "0 auto", padding: 24 }}>
-      <Link href="/" style={{ opacity: 0.85 }}>← Back</Link>
-      <h1 style={{ marginTop: 10 }}>Study Pack #{studyPackId}</h1>
-
-      <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
-        <button onClick={refreshAll} disabled={loading || running}>Refresh</button>
-        <button onClick={onGenerate} disabled={loading || running}>Generate Study Materials</button>
-      </div>
-
-      {err && <div style={{ marginTop: 12, color: "tomato", whiteSpace: "pre-wrap" }}>{err}</div>}
-
-      {loading && <div style={{ marginTop: 12, opacity: 0.8 }}>Loading…</div>}
-
-      {pack && (
-        <MaterialSection title="Pack">
-          <div><b>Source:</b> {pack.source_type}</div>
-          <div><b>URL:</b> {pack.source_url}</div>
-          <div><b>Language:</b> {pack.language || "-"}</div>
-          <div><b>Status:</b> {pack.status}</div>
-        </MaterialSection>
-      )}
-
-      {lastJob && (
-        <MaterialSection title="Last generation job">
-          <div><b>Job:</b> {lastJob.job_id}</div>
-          <div><b>Status:</b> {lastJob.status}</div>
-          {lastJob.error && <div style={{ color: "tomato" }}><b>Error:</b> {lastJob.error}</div>}
-        </MaterialSection>
-      )}
-
-      <MaterialSection title="Materials">
-        {!materials?.length ? (
-          <div style={{ opacity: 0.8 }}>
-            If you don’t see materials yet, click “Generate Study Materials”.
-            <div style={{ marginTop: 6, opacity: 0.8 }}>No materials found for this pack.</div>
+    <main style={{ marginTop: 18 }}>
+      {/* TOP BAR */}
+      <section className="glass card">
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <div>
+            <Link href="/" className="muted">← Back</Link>
+            <h1 style={{ margin: "8px 0 0", fontSize: 26, letterSpacing: "-0.03em" }}>
+              Study Pack <span className="mono">#{studyPackId}</span>
+            </h1>
+            <div className="muted" style={{ marginTop: 6 }}>
+              Generate and browse materials in a clean structure.
+            </div>
           </div>
-        ) : (
-          <div style={{ display: "grid", gap: 14 }}>
-            {materials.map((m) => (
-              <MaterialSection key={m.id} title={`${m.kind} (${m.status})`}>
-                {renderMaterial(m)}
-              </MaterialSection>
-            ))}
+
+          <div className="row">
+            <button className="btn ghost" onClick={refreshAll} disabled={loading || running}>
+              {loading ? "Refreshing…" : "Refresh"}
+            </button>
+            <button className="btn primary" onClick={onGenerate} disabled={loading || running}>
+              {running ? "Generating…" : "Generate materials"}
+            </button>
+          </div>
+        </div>
+
+        {err && (
+          <div className="alert" style={{ marginTop: 12 }}>
+            <strong>Error:</strong> {err}
           </div>
         )}
-      </MaterialSection>
+
+        {lastJob && (
+          <div className="success" style={{ marginTop: 12 }}>
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <div>
+                <strong>Last generation job:</strong> <span className="mono">#{lastJob.job_id}</span>
+              </div>
+              <span className="badge">
+                <span className="muted2">Status</span>&nbsp; <span className="mono">{lastJob.status}</span>
+              </span>
+            </div>
+            {lastJob.error && (
+              <div style={{ marginTop: 8 }}>
+                <strong>Job error:</strong> {lastJob.error}
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
+      {/* PACK META */}
+      <section className="glass card" style={{ marginTop: 14 }}>
+        <div className="card-title">Pack details</div>
+        {!pack ? (
+          <div className="muted">{loading ? "Loading…" : "Not found."}</div>
+        ) : (
+          <div style={{ display: "grid", gap: 6 }}>
+            <MetaLine label="Source" value={pack.source_type} />
+            <MetaLine label="URL" value={<span className="mono">{shortUrl(pack.source_url)}</span>} />
+            <MetaLine label="Language" value={<span className="mono">{pack.language || "-"}</span>} />
+            <MetaLine label="Status" value={<span className="mono">{pack.status}</span>} />
+          </div>
+        )}
+      </section>
+
+      {/* MATERIALS */}
+      <section className="glass card" style={{ marginTop: 14 }}>
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <div className="card-title" style={{ marginBottom: 0 }}>
+            Materials
+          </div>
+
+          {materials?.length ? (
+            <span className="badge">
+              <span className="muted2">Items</span>&nbsp; <span className="mono">{materials.length}</span>
+            </span>
+          ) : (
+            <span className="badge subtle">No materials yet</span>
+          )}
+        </div>
+
+        <div className="tabs">
+          {(Object.keys(TAB_LABELS) as TabKey[]).map((k) => (
+            <button
+              key={k}
+              className={`tab ${tab === k ? "active" : ""}`}
+              onClick={() => setTab(k)}
+              disabled={loading}
+            >
+              {TAB_LABELS[k]}
+            </button>
+          ))}
+        </div>
+
+        <div className="sep" />
+
+        {!materials?.length ? (
+          <div className="muted" style={{ lineHeight: 1.75 }}>
+            Click <b>Generate materials</b> to create summary, takeaways, chapters, flashcards, and quiz for this pack.
+          </div>
+        ) : (
+          <>
+            {/* Per-material error banner if present */}
+            {current?.error && (
+              <div className="alert" style={{ marginBottom: 12 }}>
+                <strong>Note:</strong> {current.error}
+              </div>
+            )}
+            {renderTab(current, tab)}
+          </>
+        )}
+      </section>
     </main>
   );
 }
