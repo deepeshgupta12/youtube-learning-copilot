@@ -182,6 +182,8 @@ def _pick_evenly(items: list[str], k: int) -> list[str]:
     return out[:k]
 
 
+
+
 # ----------------------------
 # Heuristic V0 generator
 # ----------------------------
@@ -358,20 +360,28 @@ def generate_and_store_all(db: Session, study_pack_id: int) -> None:
 
     provider = os.getenv("STUDY_MATERIALS_PROVIDER", "heuristic").lower()
 
+    transcript_clean = _clean_text(sp.transcript_text)
+
+    payload: dict[str, Any]
+    openai_error: str | None = None
+
     if provider == "openai":
         try:
-            # Lazy import to avoid import-time cycles and to keep heuristic mode lightweight.
             from app.services.llm.openai_client import generate_study_materials_openai
-
-            payload = generate_study_materials_openai(sp.transcript_text)
-        except Exception:
-            # If OpenAI is misconfigured or fails, fallback so the pipeline still works.
-            provider = "heuristic"
-            payload = generate_materials_payload_heuristic(sp.transcript_text)
+            payload = generate_study_materials_openai(transcript_clean)
+        except Exception as e:
+            # fail loudly into DB rows so UI shows what happened
+            openai_error = str(e)
+            payload = generate_materials_payload_heuristic(transcript_clean)
     else:
-        payload = generate_materials_payload_heuristic(sp.transcript_text)
+        payload = generate_materials_payload_heuristic(transcript_clean)
 
-    errs = validate_payload(sp.transcript_text, payload, provider=provider)
+    errs = validate_payload(transcript_clean, payload)
+
+    # If OpenAI failed, tag every kind with the OpenAI error (but still store heuristic content)
+    if openai_error:
+        for k in ["summary", "key_takeaways", "chapters", "flashcards", "quiz"]:
+            errs.setdefault(k, f"OpenAI failed, stored heuristic fallback. Root error: {openai_error}")
 
     kinds = ["summary", "key_takeaways", "chapters", "flashcards", "quiz"]
     for kind in kinds:
@@ -380,7 +390,7 @@ def generate_and_store_all(db: Session, study_pack_id: int) -> None:
                 db,
                 study_pack_id,
                 kind,
-                status="failed",
+                status="generated",  # still generated (fallback) but with error banner
                 content_json_obj=payload.get(kind),
                 content_text=material_text(kind, payload.get(kind) or {}),
                 error=errs[kind],
