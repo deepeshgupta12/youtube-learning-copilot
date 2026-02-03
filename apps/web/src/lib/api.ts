@@ -73,6 +73,30 @@ export type FlashcardMarkRequest = {
   action: "known" | "review_later" | "reset" | "seen";
 };
 
+export type QuizProgressItem = {
+  question_index: number;
+  status: "correct" | "wrong" | null;
+  seen_count: number;
+  correct_count: number;
+  wrong_count: number;
+  last_seen_at: string | null;
+};
+
+export type QuizProgressResponse = {
+  ok: boolean;
+  study_pack_id: number;
+  total_questions: number;
+  seen_questions: number;
+  correct_questions: number;
+  wrong_questions: number;
+  items: QuizProgressItem[];
+};
+
+export type QuizMarkRequest = {
+  question_index: number;
+  action: "correct" | "wrong" | "reset" | "seen";
+};
+
 export type StudyMaterialRow = {
   id: number;
   kind: "summary" | "key_takeaways" | "chapters" | "flashcards" | "quiz" | string;
@@ -264,6 +288,23 @@ export async function markFlashcardProgress(
 ): Promise<FlashcardProgressResponse> {
   return apiFetch<FlashcardProgressResponse>(
     `/study-packs/${studyPackId}/flashcards/progress`,
+    { method: "POST", body: JSON.stringify(req) }
+  );
+}
+
+export async function getQuizProgress(studyPackId: number): Promise<QuizProgressResponse> {
+  return apiFetch<QuizProgressResponse>(
+    `/study-packs/${studyPackId}/quiz/progress`,
+    { method: "GET" }
+  );
+}
+
+export async function markQuizProgress(
+  studyPackId: number,
+  req: QuizMarkRequest
+): Promise<QuizProgressResponse> {
+  return apiFetch<QuizProgressResponse>(
+    `/study-packs/${studyPackId}/quiz/progress`,
     { method: "POST", body: JSON.stringify(req) }
   );
 }
