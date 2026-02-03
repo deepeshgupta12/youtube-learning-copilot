@@ -145,6 +145,36 @@ export type GenerateMaterialsResponse = {
   task_id: string;
 };
 
+export type TranscriptGetResponse = {
+  ok: boolean;
+  study_pack_id: number;
+  status: string;
+  source_id: string | null;
+  language: string | null;
+  transcript_text: string | null;
+  transcript_json: string | null;
+  updated_at: string | null;
+};
+
+export type TranscriptChunkItem = {
+  id: number;
+  idx: number; // IMPORTANT: matches backend/model
+  start_sec: number;
+  end_sec: number;
+  text: string;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type TranscriptChunksResponse = {
+  ok: boolean;
+  study_pack_id: number;
+  total: number;
+  limit: number;
+  offset: number;
+  items: TranscriptChunkItem[];
+};
+
 /** ✅ V1 Minimal Library types */
 export type StudyPackListItem = {
   id: number;
@@ -333,6 +363,22 @@ export async function markQuizProgress(
   );
 }
 
+export async function getTranscript(studyPackId: number): Promise<TranscriptGetResponse> {
+  return apiFetch(`/study-packs/${studyPackId}/transcript`);
+}
+
+export async function listTranscriptChunks(args: {
+  studyPackId: number;
+  q?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<TranscriptChunksResponse> {
+  const qs = new URLSearchParams();
+  if (args.q) qs.set("q", args.q);
+  qs.set("limit", String(args.limit ?? 50));
+  qs.set("offset", String(args.offset ?? 0));
+  return apiFetch(`/study-packs/${args.studyPackId}/transcript/chunks?${qs.toString()}`);
+=======
 export async function getChapterProgress(studyPackId: number): Promise<ChapterProgressResponse> {
   return apiFetch<ChapterProgressResponse>(
     `/study-packs/${studyPackId}/chapters/progress`,

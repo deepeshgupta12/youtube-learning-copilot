@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
+from app.models.transcript_chunk import TranscriptChunk
 from app.db.session import get_db
 from app.models.study_pack import StudyPack
 from app.services.jobs import create_job
@@ -220,4 +221,72 @@ def get_study_pack(study_pack_id: int, db: Session = Depends(get_db)):
             "playlist_title": sp.playlist_title,
             "playlist_index": sp.playlist_index,
         },
+    }
+
+@router.get("/{study_pack_id}/transcript")
+def get_transcript(study_pack_id: int, db: Session = Depends(get_db)):
+    sp = db.query(StudyPack).filter(StudyPack.id == study_pack_id).first()
+    if not sp:
+        raise HTTPException(status_code=404, detail="Study pack not found")
+
+    return {
+        "ok": True,
+        "study_pack_id": sp.id,
+        "status": sp.status,
+        "source_id": sp.source_id,
+        "language": sp.language,
+        "transcript_text": sp.transcript_text,
+        "transcript_json": sp.transcript_json,
+        "updated_at": sp.updated_at.isoformat() if sp.updated_at else None,
+    }
+
+
+@router.get("/{study_pack_id}/transcript/chunks")
+def list_transcript_chunks(
+    study_pack_id: int,
+    db: Session = Depends(get_db),
+    q: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    sp = db.query(StudyPack).filter(StudyPack.id == study_pack_id).first()
+    if not sp:
+        raise HTTPException(status_code=404, detail="Study pack not found")
+
+    query = db.query(TranscriptChunk).filter(TranscriptChunk.study_pack_id == study_pack_id)
+
+    if q and q.strip():
+        s = f"%{q.strip()}%"
+        query = query.filter(TranscriptChunk.text.ilike(s))
+
+    total = query.count()
+
+    rows = (
+        query.order_by(TranscriptChunk.idx.asc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    items = []
+    for r in rows:
+        items.append(
+            {
+                "id": int(r.id),
+                "idx": r.idx,
+                "start_sec": float(r.start_sec),
+                "end_sec": float(r.end_sec),
+                "text": r.text,
+                "created_at": r.created_at.isoformat() if getattr(r, "created_at", None) else None,
+                "updated_at": r.updated_at.isoformat() if getattr(r, "updated_at", None) else None,
+            }
+        )
+
+    return {
+        "ok": True,
+        "study_pack_id": study_pack_id,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "items": items,
     }
