@@ -10,6 +10,8 @@ from app.models.study_material import StudyMaterial
 from app.models.study_pack import StudyPack
 from app.services.jobs import create_job
 from app.worker.generate_tasks import generate_study_materials
+from pydantic import BaseModel
+from app.services.flashcards import get_flashcards_progress, mark_flashcard
 
 router = APIRouter(prefix="/study-packs", tags=["study_materials"])
 
@@ -19,6 +21,18 @@ class GenerateStudyMaterialsResponse(BaseModel):
     study_pack_id: int
     job_id: int
     task_id: str
+class FlashcardProgressResponse(BaseModel):
+    ok: bool
+    study_pack_id: int
+    total_cards: int
+    seen_cards: int
+    known_cards: int
+    review_later_cards: int
+    items: list[dict]
+
+class FlashcardMarkRequest(BaseModel):
+    card_index: int
+    action: str  # known | review_later | reset | seen
 
 
 @router.post("/{study_pack_id}/generate", response_model=GenerateStudyMaterialsResponse)
@@ -74,3 +88,24 @@ def get_materials(study_pack_id: int, db: Session = Depends(get_db)):
         )
 
     return {"ok": True, "study_pack_id": study_pack_id, "materials": materials}
+
+@router.get("/{study_pack_id}/flashcards/progress", response_model=FlashcardProgressResponse)
+def flashcards_progress(study_pack_id: int, db: Session = Depends(get_db)) -> FlashcardProgressResponse:
+    try:
+        p = get_flashcards_progress(db, study_pack_id)
+        return FlashcardProgressResponse(ok=True, **p)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{study_pack_id}/flashcards/progress", response_model=FlashcardProgressResponse)
+def flashcards_mark(
+    study_pack_id: int,
+    req: FlashcardMarkRequest,
+    db: Session = Depends(get_db),
+) -> FlashcardProgressResponse:
+    try:
+        p = mark_flashcard(db, study_pack_id, req.card_index, req.action)
+        return FlashcardProgressResponse(ok=True, **p)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
