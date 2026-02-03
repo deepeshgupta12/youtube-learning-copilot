@@ -290,6 +290,13 @@ export default function PackPage() {
             Study Flashcards
           </Link>
 
+          <Link
+            href={`/packs/${studyPackId}/study/transcript`}
+            className="rounded-xl border border-white/15 bg-white/5 px-4 py-2 text-xs text-white/85 hover:bg-white/8"
+          >
+            Study transcript
+          </Link>
+
           <button
             onClick={refreshAll}
             disabled={loading || running}
