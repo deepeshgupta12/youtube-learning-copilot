@@ -1,7 +1,8 @@
 # apps/api/app/worker/ingest_tasks.py
 from __future__ import annotations
-import os
 
+import os
+import re
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -9,18 +10,24 @@ from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
 from app.models.study_pack import StudyPack
 from app.models.transcript_chunk import TranscriptChunk
-from app.services.jobs import set_job_status, merge_job_payload
-from app.services.study_packs import set_ingested, set_failed
+from app.services.jobs import merge_job_payload, set_job_status
+from app.services.study_packs import set_failed, set_ingested
 import app.services.transcript as transcript
 from app.worker.celery_app import celery_app
 
 
 # -----------------------------
-# Smart chunking (V1.4)
+# Smart chunking (V1.4.2)
+#   - time/char bound chunks
+#   - overlap-aware append to reduce repetition
 # -----------------------------
 _CHUNK_MAX_SECONDS = float(os.getenv("YLC_CHUNK_MAX_SECONDS", "35"))
 _CHUNK_MAX_CHARS = int(os.getenv("YLC_CHUNK_MAX_CHARS", "900"))
 _CHUNK_MIN_CHARS = int(os.getenv("YLC_CHUNK_MIN_CHARS", "220"))
+
+# Overlap detection knobs (word-based)
+_OVERLAP_WINDOW_WORDS = int(os.getenv("YLC_OVERLAP_WINDOW_WORDS", "18"))  # how many words to compare
+_OVERLAP_MIN_WORDS = int(os.getenv("YLC_OVERLAP_MIN_WORDS", "4"))  # require at least this many words overlap
 
 
 def _seg_end(seg: dict[str, Any]) -> float:
@@ -29,11 +36,96 @@ def _seg_end(seg: dict[str, Any]) -> float:
     return float(max(start, start + max(0.0, dur)))
 
 
+def _normalize_spaces(s: str) -> str:
+    return " ".join((s or "").split()).strip()
+
+
+_word_re = re.compile(r"[A-Za-z0-9']+")
+
+
+def _words(s: str) -> list[str]:
+    """
+    Lowercased word tokens.
+    Using regex helps avoid punctuation mismatches from captions/subs.
+    """
+    if not s:
+        return []
+    return [w.lower() for w in _word_re.findall(s)]
+
+
+def _strip_overlap(existing_text: str, incoming_text: str) -> str:
+    """
+    Remove duplicated overlap where incoming starts with something existing already ends with.
+
+    Example:
+      existing: "... talk about the brain"
+      incoming: "talk about the brain structure and function"
+      => returns "structure and function"
+    """
+    a = _words(existing_text)
+    b = _words(incoming_text)
+    if not a or not b:
+        return incoming_text.strip()
+
+    # Compare suffix of a vs prefix of b, up to window size
+    win = min(_OVERLAP_WINDOW_WORDS, len(a), len(b))
+    best_k = 0
+    for k in range(win, _OVERLAP_MIN_WORDS - 1, -1):
+        if a[-k:] == b[:k]:
+            best_k = k
+            break
+
+    if best_k <= 0:
+        return incoming_text.strip()
+
+    # We found overlap by words; now remove the overlapped prefix from the *original* incoming text.
+    # Safer approach: drop by word count from the incoming string while preserving casing/punctuation.
+    # We'll split incoming by whitespace and remove the first `best_k` "word-like" tokens.
+    tokens = incoming_text.strip().split()
+    if not tokens:
+        return incoming_text.strip()
+
+    # Build mapping of which whitespace tokens contain word tokens.
+    # We remove tokens until we've removed best_k word tokens.
+    removed_word_count = 0
+    cut_idx = 0
+    for i, tok in enumerate(tokens):
+        # Count how many word tokens in this whitespace token
+        wcount = len(_word_re.findall(tok))
+        if wcount > 0:
+            removed_word_count += wcount
+        cut_idx = i + 1
+        if removed_word_count >= best_k:
+            break
+
+    remainder = " ".join(tokens[cut_idx:]).strip()
+    return remainder
+
+
 def _join_text(parts: list[str]) -> str:
     s = " ".join([p.strip() for p in parts if (p or "").strip()]).strip()
-    # normalize spaces
-    s = " ".join(s.split())
-    return s
+    return _normalize_spaces(s)
+
+
+def _append_segment_text(cur_text_parts: list[str], seg_text: str) -> None:
+    """
+    Append seg_text into cur_text_parts but avoid overlap duplication.
+    """
+    seg_text = _normalize_spaces(seg_text)
+    if not seg_text:
+        return
+
+    if not cur_text_parts:
+        cur_text_parts.append(seg_text)
+        return
+
+    existing = _join_text(cur_text_parts)
+    remainder = _strip_overlap(existing, seg_text)
+    remainder = _normalize_spaces(remainder)
+
+    # If remainder became empty, don't append anything
+    if remainder:
+        cur_text_parts.append(remainder)
 
 
 def _segments_to_smart_chunks(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -47,10 +139,9 @@ def _segments_to_smart_chunks(segments: list[dict[str, Any]]) -> list[dict[str, 
       {idx, start_sec, end_sec, text}
     """
     if not segments:
-        return []
 
-    chunks: list[dict[str, Any]] = []
-    idx = 0
+        chunks: list[dict[str, Any]] = []
+        idx = 0
 
     cur_text_parts: list[str] = []
     cur_start: float | None = None
@@ -77,7 +168,14 @@ def _segments_to_smart_chunks(segments: list[dict[str, Any]]) -> list[dict[str, 
             prev["text"] = _join_text([prev["text"], text])
             prev["end_sec"] = max(float(prev["end_sec"]), float(cur_end))
         else:
-            chunks.append({"idx": idx, "start_sec": float(cur_start), "end_sec": float(cur_end), "text": text})
+            chunks.append(
+                {
+                    "idx": idx,
+                    "start_sec": float(cur_start),
+                    "end_sec": float(cur_end),
+                    "text": text,
+                }
+            )
             idx += 1
 
         cur_text_parts = []
@@ -95,12 +193,18 @@ def _segments_to_smart_chunks(segments: list[dict[str, Any]]) -> list[dict[str, 
         if cur_start is None:
             cur_start = start
             cur_end = end
-            cur_text_parts = [txt]
+            cur_text_parts = []
+            _append_segment_text(cur_text_parts, txt)
             continue
 
         # evaluate if adding this segment would exceed chunk constraints
+        # NOTE: use overlap-aware append for length estimation too
+        existing = _join_text(cur_text_parts)
+        candidate_remainder = _strip_overlap(existing, txt)
+        candidate_text = _join_text(cur_text_parts + ([candidate_remainder] if candidate_remainder else []))
+
         next_end = max(float(cur_end), end)
-        next_text_len = len(_join_text(cur_text_parts + [txt]))
+        next_text_len = len(candidate_text)
         next_dur = next_end - float(cur_start)
 
         if next_text_len > _CHUNK_MAX_CHARS or next_dur > _CHUNK_MAX_SECONDS:
@@ -108,11 +212,12 @@ def _segments_to_smart_chunks(segments: list[dict[str, Any]]) -> list[dict[str, 
             # start new chunk with current seg
             cur_start = start
             cur_end = end
-            cur_text_parts = [txt]
+            cur_text_parts = []
+            _append_segment_text(cur_text_parts, txt)
             continue
 
-        # append
-        cur_text_parts.append(txt)
+        # append with overlap-dedupe
+        _append_segment_text(cur_text_parts, txt)
         cur_end = next_end
 
     flush(force=True)
@@ -152,7 +257,7 @@ def ingest_youtube_captions(job_id: int, study_pack_id: int, video_id: str, lang
       - yt-dlp subs fallback
       - STT fallback (audio+ffmpeg+faster-whisper)
       - stores cleaned transcript_json + cleaned transcript_text
-      - writes smart transcript_chunks
+      - writes smart transcript_chunks (V1.4.2 overlap-aware)
     """
     db: Session = SessionLocal()
     try:
@@ -174,7 +279,7 @@ def ingest_youtube_captions(job_id: int, study_pack_id: int, video_id: str, lang
         merge_job_payload(db, job_id, {"method": method, "progress": {"stage": "clean_transcript"}})
 
         cleaned_segments = transcript.clean_segments(raw_segments)
-        cleaned_text = transcript._segments_to_text(cleaned_segments)  # re-use local helper style
+        cleaned_text = transcript._segments_to_text(cleaned_segments)
 
         merge_job_payload(db, job_id, {"progress": {"stage": "write_chunks"}})
 
@@ -195,6 +300,8 @@ def ingest_youtube_captions(job_id: int, study_pack_id: int, video_id: str, lang
                 "max_seconds": _CHUNK_MAX_SECONDS,
                 "max_chars": _CHUNK_MAX_CHARS,
                 "min_chars": _CHUNK_MIN_CHARS,
+                "overlap_window_words": _OVERLAP_WINDOW_WORDS,
+                "overlap_min_words": _OVERLAP_MIN_WORDS,
             },
         }
 
@@ -312,6 +419,8 @@ def ingest_youtube_playlist(
                         "max_seconds": _CHUNK_MAX_SECONDS,
                         "max_chars": _CHUNK_MAX_CHARS,
                         "min_chars": _CHUNK_MIN_CHARS,
+                        "overlap_window_words": _OVERLAP_WINDOW_WORDS,
+                        "overlap_min_words": _OVERLAP_MIN_WORDS,
                     },
                 }
 
