@@ -274,7 +274,7 @@ export default function PackPage() {
   return (
     <main className="mx-auto w-full max-w-5xl px-6 py-10">
       <div className="flex items-center justify-between gap-4">
-        <Link href="/" className="text-sm text-white/70 hover:text-white">
+        <Link href="/packs" className="text-sm text-white/70 hover:text-white">
           ← Back
         </Link>
 
@@ -315,15 +315,25 @@ export default function PackPage() {
             title="Last generation job"
             right={<span className="text-white/60">Job #{lastJob.job_id}</span>}
           >
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
               <div className="text-sm text-white/80">
                 Status: <span className="font-semibold text-white">{lastJob.status}</span>
               </div>
-              {lastJob.error ? (
-                <div className="text-xs text-red-200">{lastJob.error}</div>
-              ) : (
-                <div className="text-xs text-white/50">OK</div>
-              )}
+
+              <div className="flex items-center gap-3">
+                {lastJob.error ? (
+                  <div className="text-xs text-red-200">{lastJob.error}</div>
+                ) : (
+                  <div className="text-xs text-white/50">OK</div>
+                )}
+
+                <Link
+                  href={`/jobs/${lastJob.job_id}`}
+                  className="text-xs text-white/80 underline underline-offset-4 hover:text-white"
+                >
+                  Open job
+                </Link>
+              </div>
             </div>
           </GlassCard>
         )}

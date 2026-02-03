@@ -7,89 +7,69 @@ from sqlalchemy.orm import Session
 from app.models.transcript_chunk import TranscriptChunk
 
 
-def segments_to_chunks(
-    segments: list[dict[str, Any]],
-    *,
-    target_words: int = 90,
-    max_words: int = 140,
-) -> list[dict[str, Any]]:
+def segments_to_chunks(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
-    Convert fine-grained segments into chunk rows:
-      {idx, start_sec, end_sec, text}
+    Converts transcript segments into DB-ready chunk dicts.
 
-    Chunking rule:
-      - accumulate segment texts until target_words reached,
-        but cap at max_words.
-      - chunk time range = min(start) to max(end).
+    Supports both:
+      A) youtube_transcript_api style: {text, start, duration}
+      B) already-normalized style: {text, start_sec, end_sec}
+
+    Returns:
+      [{idx, start_sec, end_sec, text}, ...]
     """
     chunks: list[dict[str, Any]] = []
-    buf_text: list[str] = []
-    buf_start: float | None = None
-    buf_end: float | None = None
-    buf_words = 0
-
-    def flush():
-        nonlocal buf_text, buf_start, buf_end, buf_words
-        if not buf_text:
-            return
-        text = " ".join([t.strip() for t in buf_text if t.strip()]).strip()
-        if not text:
-            buf_text, buf_start, buf_end, buf_words = [], None, None, 0
-            return
-        chunks.append(
-            {
-                "idx": len(chunks),
-                "start_sec": float(buf_start or 0.0),
-                "end_sec": float(buf_end or (buf_start or 0.0)),
-                "text": text,
-            }
-        )
-        buf_text, buf_start, buf_end, buf_words = [], None, None, 0
+    idx = 0
 
     for seg in segments or []:
-        txt = str(seg.get("text") or "").strip()
+        txt = (seg.get("text") or "").strip()
         if not txt:
             continue
-        start = float(seg.get("start") or 0.0)
-        duration = float(seg.get("duration") or 0.0)
-        end = start + max(0.0, duration)
 
-        words = len(txt.split())
-        if buf_start is None:
-            buf_start = start
-            buf_end = end
+        # Case B: already normalized
+        if "start_sec" in seg and "end_sec" in seg:
+            start = float(seg.get("start_sec") or 0.0)
+            end = float(seg.get("end_sec") or start)
         else:
-            buf_end = max(buf_end or end, end)
+            # Case A: youtube_transcript_api
+            start = float(seg.get("start") or 0.0)
+            dur = float(seg.get("duration") or 0.0)
+            end = start + max(dur, 0.0)
 
-        # If adding this would exceed max_words, flush first (if buffer has something)
-        if buf_words > 0 and (buf_words + words) > max_words:
-            flush()
-            buf_start = start
-            buf_end = end
+        if end < start:
+            end = start
 
-        buf_text.append(txt)
-        buf_words += words
+        chunks.append(
+            {
+                "idx": idx,
+                "start_sec": start,
+                "end_sec": end,
+                "text": txt,
+            }
+        )
+        idx += 1
 
-        if buf_words >= target_words:
-            flush()
-
-    flush()
     return chunks
 
 
 def replace_chunks(db: Session, study_pack_id: int, chunks: list[dict[str, Any]]) -> None:
     """
-    Idempotent: delete existing chunks for pack, insert new ones.
+    Deletes old chunks for pack and inserts new ones, then commits.
     """
+    # Clear existing
     db.query(TranscriptChunk).filter(TranscriptChunk.study_pack_id == study_pack_id).delete()
-    for ch in chunks:
-        db.add(
-            TranscriptChunk(
-                study_pack_id=study_pack_id,
-                idx=int(ch["idx"]),
-                start_sec=float(ch["start_sec"]),
-                end_sec=float(ch["end_sec"]),
-                text=str(ch["text"]),
-            )
-        )
+
+    if chunks:
+        rows = [
+            {
+                "study_pack_id": study_pack_id,
+                "idx": c["idx"],
+                "start_sec": c["start_sec"],
+                "end_sec": c["end_sec"],
+                "text": c["text"],
+            }
+            for c in chunks
+        ]
+        db.bulk_insert_mappings(TranscriptChunk, rows)
+
     db.commit()
