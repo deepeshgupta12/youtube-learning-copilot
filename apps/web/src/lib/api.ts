@@ -49,6 +49,30 @@ export type StudyPackResponse = {
   };
 };
 
+export type FlashcardProgressItem = {
+  card_index: number;
+  status: "known" | "review_later" | null;
+  seen_count: number;
+  known_count: number;
+  review_later_count: number;
+  last_seen_at: string | null;
+};
+
+export type FlashcardProgressResponse = {
+  ok: boolean;
+  study_pack_id: number;
+  total_cards: number;
+  seen_cards: number;
+  known_cards: number;
+  review_later_cards: number;
+  items: FlashcardProgressItem[];
+};
+
+export type FlashcardMarkRequest = {
+  card_index: number;
+  action: "known" | "review_later" | "reset" | "seen";
+};
+
 export type StudyMaterialRow = {
   id: number;
   kind: "summary" | "key_takeaways" | "chapters" | "flashcards" | "quiz" | string;
@@ -225,4 +249,21 @@ export async function pollJobUntilDone(
 
     await new Promise((r) => setTimeout(r, intervalMs));
   }
+}
+
+export async function getFlashcardProgress(studyPackId: number): Promise<FlashcardProgressResponse> {
+  return apiFetch<FlashcardProgressResponse>(
+    `/study-packs/${studyPackId}/flashcards/progress`,
+    { method: "GET" }
+  );
+}
+
+export async function markFlashcardProgress(
+  studyPackId: number,
+  req: FlashcardMarkRequest
+): Promise<FlashcardProgressResponse> {
+  return apiFetch<FlashcardProgressResponse>(
+    `/study-packs/${studyPackId}/flashcards/progress`,
+    { method: "POST", body: JSON.stringify(req) }
+  );
 }
