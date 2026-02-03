@@ -33,9 +33,7 @@ function GlassCard({
   children: React.ReactNode;
 }) {
   return (
-    <section
-      className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl shadow-[0_8px_40px_rgba(0,0,0,0.35)]"
-    >
+    <section className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl shadow-[0_8px_40px_rgba(0,0,0,0.35)]">
       {(title || right) && (
         <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-white/10">
           <div className="text-sm font-semibold text-white/90">{title}</div>
@@ -72,9 +70,7 @@ function PillTabs({
             ].join(" ")}
           >
             {k === "key_takeaways" ? "Key takeaways" : k[0].toUpperCase() + k.slice(1)}
-            <span className="ml-2 text-[10px] text-white/50">
-              {counts[k] ?? 0}
-            </span>
+            <span className="ml-2 text-[10px] text-white/50">{counts[k] ?? 0}</span>
           </button>
         );
       })}
@@ -110,16 +106,9 @@ function RenderMaterial({ m }: { m: StudyMaterialRow }) {
     return (
       <div className="grid gap-3">
         {items.map((ch, i) => (
-          <div
-            key={i}
-            className="rounded-xl border border-white/10 bg-white/5 p-4"
-          >
-            <div className="font-semibold text-white/90">
-              {ch?.title || `Chapter ${i + 1}`}
-            </div>
-            {ch?.summary && (
-              <div className="mt-2 text-white/75 leading-7">{ch.summary}</div>
-            )}
+          <div key={i} className="rounded-xl border border-white/10 bg-white/5 p-4">
+            <div className="font-semibold text-white/90">{ch?.title || `Chapter ${i + 1}`}</div>
+            {ch?.summary && <div className="mt-2 text-white/75 leading-7">{ch.summary}</div>}
 
             {Array.isArray(ch?.sentences) && ch.sentences.length > 0 && (
               <details className="mt-3">
@@ -147,16 +136,9 @@ function RenderMaterial({ m }: { m: StudyMaterialRow }) {
     return (
       <div className="grid gap-3">
         {items.map((fc, i) => (
-          <div
-            key={i}
-            className="rounded-xl border border-white/10 bg-white/5 p-4"
-          >
-            <div className="font-semibold text-white/90">
-              Q{i + 1}. {fc?.q}
-            </div>
-            <div className="mt-2 text-white/80 leading-7">
-              A{i + 1}. {fc?.a}
-            </div>
+          <div key={i} className="rounded-xl border border-white/10 bg-white/5 p-4">
+            <div className="font-semibold text-white/90">Q{i + 1}. {fc?.q}</div>
+            <div className="mt-2 text-white/80 leading-7">A{i + 1}. {fc?.a}</div>
           </div>
         ))}
       </div>
@@ -169,10 +151,7 @@ function RenderMaterial({ m }: { m: StudyMaterialRow }) {
     return (
       <div className="grid gap-3">
         {items.map((q, i) => (
-          <div
-            key={i}
-            className="rounded-xl border border-white/10 bg-white/5 p-4"
-          >
+          <div key={i} className="rounded-xl border border-white/10 bg-white/5 p-4">
             <div className="font-semibold text-white/90 leading-6">
               {i + 1}. {q?.question}
             </div>
@@ -184,9 +163,7 @@ function RenderMaterial({ m }: { m: StudyMaterialRow }) {
               ))}
             </ol>
             {typeof q?.answer_index === "number" && (
-              <div className="mt-3 text-xs text-white/60">
-                Answer: {q.answer_index + 1}
-              </div>
+              <div className="mt-3 text-xs text-white/60">Answer: {q.answer_index + 1}</div>
             )}
           </div>
         ))}
@@ -216,7 +193,13 @@ export default function PackPage() {
   const [tab, setTab] = useState<Kind>("summary");
 
   const counts = useMemo(() => {
-    const c: Record<string, number> = { summary: 0, key_takeaways: 0, chapters: 0, flashcards: 0, quiz: 0 };
+    const c: Record<string, number> = {
+      summary: 0,
+      key_takeaways: 0,
+      chapters: 0,
+      flashcards: 0,
+      quiz: 0,
+    };
     for (const m of materials || []) {
       const k = m.kind;
       if (typeof k === "string") c[k] = (c[k] || 0) + 1;
@@ -278,7 +261,20 @@ export default function PackPage() {
           ← Back
         </Link>
 
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap justify-end">
+          {/* ✅ NEW: Study Hub CTA */}
+          <Link
+            href={`/packs/${studyPackId}/study`}
+            className={[
+              "rounded-xl border border-white/15 bg-white/10 px-4 py-2 text-xs",
+              "text-white hover:bg-white/15",
+              loading ? "pointer-events-none opacity-50" : "",
+            ].join(" ")}
+          >
+            Study
+          </Link>
+
+          {/* Existing study links (keep) */}
           <Link
             href={`/packs/${studyPackId}/study/flashcards`}
             className={[
@@ -292,9 +288,24 @@ export default function PackPage() {
 
           <Link
             href={`/packs/${studyPackId}/study/chapters`}
-            className="rounded-xl border border-white/15 bg-white/5 px-4 py-2 text-xs text-white/85 hover:bg-white/8"
+            className={[
+              "rounded-xl border border-white/15 bg-white/5 px-4 py-2 text-xs",
+              "text-white/85 hover:bg-white/8",
+              loading ? "pointer-events-none opacity-50" : "",
+            ].join(" ")}
           >
             Study chapters
+          </Link>
+
+          <Link
+            href={`/packs/${studyPackId}/study/quiz`}
+            className={[
+              "rounded-xl border border-white/15 bg-white/5 px-4 py-2 text-xs",
+              "text-white/85 hover:bg-white/8",
+              loading ? "pointer-events-none opacity-50" : "",
+            ].join(" ")}
+          >
+            Study quiz
           </Link>
 
           <button
@@ -304,6 +315,7 @@ export default function PackPage() {
           >
             Refresh
           </button>
+
           <button
             onClick={onGenerate}
             disabled={loading || running}
@@ -316,9 +328,7 @@ export default function PackPage() {
 
       <div className="mt-6">
         <h1 className="text-3xl font-semibold text-white">Study Pack #{studyPackId}</h1>
-        <p className="mt-2 text-sm text-white/60">
-          Generate and browse materials in a clean structure.
-        </p>
+        <p className="mt-2 text-sm text-white/60">Generate and browse materials in a clean structure.</p>
       </div>
 
       {err && (
@@ -329,10 +339,7 @@ export default function PackPage() {
 
       <div className="mt-6 grid gap-4">
         {lastJob && (
-          <GlassCard
-            title="Last generation job"
-            right={<span className="text-white/60">Job #{lastJob.job_id}</span>}
-          >
+          <GlassCard title="Last generation job" right={<span className="text-white/60">Job #{lastJob.job_id}</span>}>
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div className="text-sm text-white/80">
                 Status: <span className="font-semibold text-white">{lastJob.status}</span>
@@ -384,10 +391,7 @@ export default function PackPage() {
           )}
         </GlassCard>
 
-        <GlassCard
-          title="Materials"
-          right={<span className="text-white/60">Items: {(materials || []).length}</span>}
-        >
+        <GlassCard title="Materials" right={<span className="text-white/60">Items: {(materials || []).length}</span>}>
           {!materials?.length ? (
             <div className="text-sm text-white/70">
               No materials found for this pack yet. Click{" "}
