@@ -1,0 +1,34 @@
+from __future__ import annotations
+
+from sqlalchemy import BigInteger, Column, DateTime, Integer, String, UniqueConstraint, func
+
+from app.db.base_class import Base
+
+
+class QuizProgress(Base):
+    __tablename__ = "study_quiz_progress"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    study_pack_id = Column(BigInteger, nullable=False, index=True)
+    question_index = Column(Integer, nullable=False)
+
+    # status: null | "correct" | "wrong"
+    status = Column(String(32), nullable=True)
+
+    seen_count = Column(Integer, nullable=False, default=0)
+    correct_count = Column(Integer, nullable=False, default=0)
+    wrong_count = Column(Integer, nullable=False, default=0)
+
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("study_pack_id", "question_index", name="uq_quiz_pack_question"),
+    )
