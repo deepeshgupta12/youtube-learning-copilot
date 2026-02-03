@@ -75,7 +75,7 @@ export default function StudyHubPage() {
 
   const [flash, setFlash] = useState<FlashcardProgressResponse | null>(null);
   const [quiz, setQuiz] = useState<QuizProgressResponse | null>(null);
-  const [chap, setChap] = useState<ChaptersProgressResponse | null>(null);
+  const [chap, setChap] = useState<ChapterProgressResponse | null>(null);
 
   async function refresh() {
     if (!studyPackId) return;
@@ -88,7 +88,7 @@ export default function StudyHubPage() {
       const [f, q, c] = await Promise.all([
         getFlashcardProgress(studyPackId),
         getQuizProgress(studyPackId),
-        getChaptersProgress(studyPackId),
+        getChapterProgress(studyPackId),
       ]);
 
       setFlash(f);

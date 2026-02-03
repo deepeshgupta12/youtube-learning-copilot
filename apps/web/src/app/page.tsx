@@ -19,6 +19,15 @@ function isLikelyYoutubeUrl(v: string): boolean {
   return s.includes("youtube.com/") || s.includes("youtu.be/");
 }
 
+function isLikelyPlaylistUrl(v: string): boolean {
+  const s = (v || "").trim();
+  if (!s) return false;
+  // covers:
+  // - https://www.youtube.com/playlist?list=...
+  // - https://www.youtube.com/watch?v=...&list=...
+  return s.includes("list=") || s.includes("/playlist");
+}
+
 export default function HomePage() {
   const router = useRouter();
 
@@ -30,6 +39,7 @@ export default function HomePage() {
   const [job, setJob] = useState<JobGetResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  const mode = useMemo(() => (isLikelyPlaylistUrl(url) ? "playlist" : "video"), [url]);
   const canSubmit = useMemo(() => isLikelyYoutubeUrl(url) && !creating, [url, creating]);
 
   async function onCreate() {
@@ -48,7 +58,8 @@ export default function HomePage() {
       const resp = await createStudyPackFromYoutube(u, language?.trim() || "en");
       setCreateResp(resp);
 
-      const finalJob = await pollJobUntilDone(resp.job_id, { intervalMs: 1200, timeoutMs: 180000 });
+      // Wait for ingest job
+      const finalJob = await pollJobUntilDone(resp.job_id, { intervalMs: 1200, timeoutMs: 300000 });
       setJob(finalJob);
 
       if (finalJob.status === "failed") {
@@ -56,7 +67,14 @@ export default function HomePage() {
         return;
       }
 
-      router.push(`/packs/${resp.study_pack_id}`);
+      // ✅ Better routing:
+      // - video -> open pack
+      // - playlist -> open Library filtered by playlist
+      if ((resp as any).playlist_id) {
+        router.push(`/packs?playlist=${(resp as any).playlist_id}`);
+      } else {
+        router.push(`/packs/${resp.study_pack_id}`);
+      }
     } catch (e: any) {
       setErr(e?.message || "Something went wrong.");
     } finally {
@@ -69,7 +87,9 @@ export default function HomePage() {
       <div style={{ marginTop: 10 }}>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <Badge tone="good">V1 Web UI</Badge>
-          <span className="muted">Ingest transcript → Generate study materials → Browse in tabs</span>
+          <span className="muted">
+            Ingest transcript → Generate study materials → Study (Flashcards / Quiz / Chapters)
+          </span>
         </div>
 
         <h1 style={{ margin: "14px 0 8px", fontSize: 44, letterSpacing: -0.6, lineHeight: 1.05 }}>
@@ -77,16 +97,20 @@ export default function HomePage() {
         </h1>
 
         <p className="muted" style={{ margin: 0, maxWidth: 760, lineHeight: 1.55 }}>
-          Paste a YouTube link. We ingest captions, then generate a clean summary, key takeaways, chapters,
-          flashcards, and a quiz you can skim in minutes.
+          Paste a YouTube video or playlist link. I ingest captions (or fall back to STT), then generate a clean
+          summary, key takeaways, chapters, flashcards, and a quiz — so you can learn faster. ⚡
         </p>
       </div>
 
       <div className="grid2" style={{ marginTop: 18 }}>
         <Card>
           <CardHeader
-            title="Create study pack"
-            subtitle="Use language = en unless you ingested captions in another language."
+            title={`Create study pack (${mode})`}
+            subtitle={
+              mode === "playlist"
+                ? "Playlist ingestion creates one pack per video and ingests them via a background job."
+                : "Single video ingestion creates one pack and ingests captions (or STT fallback)."
+            }
             right={<Badge>API: localhost</Badge>}
           />
           <CardBody>
@@ -95,7 +119,7 @@ export default function HomePage() {
                 label="YouTube URL"
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://www.youtube.com/watch?v=..."
+                placeholder="https://www.youtube.com/watch?v=... or https://www.youtube.com/playlist?list=..."
               />
 
               <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", gap: 12 }}>
@@ -106,14 +130,16 @@ export default function HomePage() {
                   placeholder="en"
                 />
                 <div className="muted" style={{ alignSelf: "end", fontSize: 13, lineHeight: 1.5 }}>
-                  If captions are missing, ingestion may fail. Try another video or set the correct language code.
+                  Tip: keep language = <b>en</b> unless captions are in another language. If captions are missing,
+                  the system can fall back to STT (yt-dlp → ffmpeg → faster-whisper). 🎧
                 </div>
               </div>
 
               <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                 <Button onClick={onCreate} disabled={!canSubmit} variant="primary">
-                  {creating ? "Creating + ingesting..." : "Create study pack"}
+                  {creating ? "Creating + ingesting..." : mode === "playlist" ? "Create playlist packs" : "Create study pack"}
                 </Button>
+
                 <Button
                   onClick={() => {
                     setUrl("");
@@ -127,6 +153,10 @@ export default function HomePage() {
                 >
                   Clear
                 </Button>
+
+                <Button variant="secondary" onClick={() => router.push("/packs")} disabled={creating}>
+                  Open library
+                </Button>
               </div>
 
               {err ? (
@@ -138,22 +168,45 @@ export default function HomePage() {
 
               {createResp ? (
                 <div className="card" style={{ padding: 12 }}>
-                  <div style={{ fontWeight: 700, marginBottom: 8 }}>Created</div>
+                  <div style={{ fontWeight: 800, marginBottom: 8 }}>Created ✅</div>
                   <div className="muted" style={{ display: "grid", gap: 4 }}>
                     <div>Study Pack ID: {createResp.study_pack_id}</div>
-                    <div>
-                      {createResp.playlist_id ? (
-                        <>
-                          <div>Playlist ID: {createResp.playlist_id}</div>
-                          {createResp.playlist_title ? <div>Playlist Title: {createResp.playlist_title}</div> : null}
-                          {typeof createResp.playlist_count === "number" ? <div>Playlist Videos: {createResp.playlist_count}</div> : null}
-                        </>
-                      ) : (
-                        <div>Video ID: {createResp.video_id}</div>
-                      )}
-                    </div>
+
+                    {(createResp as any).playlist_id ? (
+                      <>
+                        <div>Playlist ID: {(createResp as any).playlist_id}</div>
+                        {(createResp as any).playlist_title ? <div>Playlist Title: {(createResp as any).playlist_title}</div> : null}
+                        {typeof (createResp as any).playlist_count === "number" ? (
+                          <div>Playlist Videos: {(createResp as any).playlist_count}</div>
+                        ) : null}
+                        {typeof (createResp as any).playlist_created_count === "number" ? (
+                          <div>New packs created: {(createResp as any).playlist_created_count}</div>
+                        ) : null}
+                        {typeof (createResp as any).playlist_reused_count === "number" ? (
+                          <div>Existing packs reused: {(createResp as any).playlist_reused_count}</div>
+                        ) : null}
+                      </>
+                    ) : (
+                      <div>Video ID: {createResp.video_id}</div>
+                    )}
+
                     <div>Job ID: {createResp.job_id}</div>
                     <div>Task ID: {createResp.task_id}</div>
+                  </div>
+
+                  <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    {(createResp as any).playlist_id ? (
+                      <Button
+                        variant="secondary"
+                        onClick={() => router.push(`/packs?playlist=${(createResp as any).playlist_id}`)}
+                      >
+                        Open playlist in library
+                      </Button>
+                    ) : (
+                      <Button variant="secondary" onClick={() => router.push(`/packs/${createResp.study_pack_id}`)}>
+                        Open pack
+                      </Button>
+                    )}
                   </div>
                 </div>
               ) : null}
@@ -162,16 +215,25 @@ export default function HomePage() {
                 <div className="card" style={{ padding: 12 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                     <div>
-                      <div style={{ fontWeight: 700 }}>Ingestion job</div>
+                      <div style={{ fontWeight: 800 }}>Ingestion job 🧩</div>
                       <div className="muted" style={{ marginTop: 6 }}>
                         Status: <span style={{ color: "rgba(255,255,255,0.86)" }}>{job.status}</span>
                       </div>
-                      {job.error ? <div style={{ marginTop: 6, color: "rgba(255,120,120,0.9)" }}>{job.error}</div> : null}
+                      {job.error ? (
+                        <div style={{ marginTop: 6, color: "rgba(255,120,120,0.9)" }}>{job.error}</div>
+                      ) : null}
                     </div>
+
                     {createResp && job.status === "done" ? (
-                      <Button onClick={() => router.push(`/packs/${createResp.study_pack_id}`)} variant="secondary">
-                        Open pack
-                      </Button>
+                      (createResp as any).playlist_id ? (
+                        <Button onClick={() => router.push(`/packs?playlist=${(createResp as any).playlist_id}`)} variant="secondary">
+                          Open playlist
+                        </Button>
+                      ) : (
+                        <Button onClick={() => router.push(`/packs/${createResp.study_pack_id}`)} variant="secondary">
+                          Open pack
+                        </Button>
+                      )
                     ) : null}
                   </div>
                 </div>
@@ -181,39 +243,39 @@ export default function HomePage() {
         </Card>
 
         <Card>
-          <CardHeader title="What you get" subtitle="Everything is structured so you can skim fast and retain more." />
+          <CardHeader title="What you get" subtitle="Everything is structured so you can skim fast and retain more. 🧠" />
           <CardBody>
             <div style={{ display: "grid", gap: 10 }}>
               <div className="card" style={{ padding: 12 }}>
-                <div style={{ fontWeight: 700 }}>Summary</div>
+                <div style={{ fontWeight: 800 }}>Summary</div>
                 <div className="muted" style={{ marginTop: 6, lineHeight: 1.5 }}>
                   A clean synthesis of the video — not a transcript dump.
                 </div>
               </div>
 
               <div className="card" style={{ padding: 12 }}>
-                <div style={{ fontWeight: 700 }}>Key takeaways</div>
+                <div style={{ fontWeight: 800 }}>Key takeaways</div>
                 <div className="muted" style={{ marginTop: 6, lineHeight: 1.5 }}>
                   High-signal bullets you can copy into notes.
                 </div>
               </div>
 
               <div className="card" style={{ padding: 12 }}>
-                <div style={{ fontWeight: 700 }}>Chapters</div>
+                <div style={{ fontWeight: 800 }}>Chapters</div>
                 <div className="muted" style={{ marginTop: 6, lineHeight: 1.5 }}>
                   A structured learning path with chapter summaries.
                 </div>
               </div>
 
               <div className="card" style={{ padding: 12 }}>
-                <div style={{ fontWeight: 700 }}>Flashcards + quiz</div>
+                <div style={{ fontWeight: 800 }}>Flashcards + quiz</div>
                 <div className="muted" style={{ marginTop: 6, lineHeight: 1.5 }}>
-                  Memory reinforcement + quick self-test.
+                  Memory reinforcement + quick self-test (with progress tracking).
                 </div>
               </div>
 
               <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
-                Tip: Keep language = en unless captions are in another language.
+                Playlist tip: when you paste a playlist, I’ll create one pack per video and you can study them from the Library. 📚
               </div>
             </div>
           </CardBody>
@@ -221,7 +283,7 @@ export default function HomePage() {
       </div>
 
       <div className="muted" style={{ marginTop: 18, fontSize: 12 }}>
-        Built for fast learning.
+        Built for fast learning — locally. 🚀
       </div>
     </main>
   );

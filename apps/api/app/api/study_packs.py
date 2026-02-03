@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, and_
 
 from app.db.session import get_db
 from app.models.study_pack import StudyPack
@@ -35,6 +35,11 @@ class StudyPackFromYoutubeResponse(BaseModel):
     playlist_title: str | None = None
     playlist_count: int | None = None
 
+    # extra playlist info (backward compatible)
+    playlist_pack_ids: list[int] | None = None
+    playlist_created_count: int | None = None
+    playlist_reused_count: int | None = None
+
 
 @router.get("")
 def list_study_packs(
@@ -42,6 +47,7 @@ def list_study_packs(
     q: str | None = Query(default=None),
     status: str | None = Query(default=None),
     source_type: str | None = Query(default=None),
+    playlist_id: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
@@ -49,7 +55,7 @@ def list_study_packs(
     V1 Minimal Library:
     - Recent study packs
     - Search by title/url/id/playlist fields
-    - Optional filters (status, source_type)
+    - Optional filters (status, source_type, playlist_id)
     - Pagination via limit/offset
     """
     query = db.query(StudyPack)
@@ -59,6 +65,9 @@ def list_study_packs(
 
     if source_type:
         query = query.filter(StudyPack.source_type == source_type)
+
+    if playlist_id:
+        query = query.filter(StudyPack.playlist_id == playlist_id)
 
     if q and q.strip():
         s = f"%{q.strip()}%"
@@ -116,18 +125,45 @@ def create_from_youtube(req: StudyPackFromYoutubeRequest, db: Session = Depends(
     if not url:
         raise HTTPException(status_code=400, detail="URL is required")
 
+    language = (req.language or "").strip() or None
+
+    # 1) Single video
     video_id = extract_youtube_video_id(url)
     if video_id:
-        sp = create_study_pack(
-            db,
-            source_type="youtube_video",
-            source_url=url,
-            source_id=video_id,
-            language=req.language,
+        # Reuse if already exists (idempotent-ish)
+        existing = (
+            db.query(StudyPack)
+            .filter(
+                and_(
+                    StudyPack.source_type == "youtube_video",
+                    StudyPack.source_id == video_id,
+                    StudyPack.playlist_id.is_(None),
+                )
+            )
+            .order_by(StudyPack.created_at.desc())
+            .first()
         )
 
+        if existing:
+            sp = existing
+            # update url/language if needed
+            if url and sp.source_url != url:
+                sp.source_url = url
+            if language and not sp.language:
+                sp.language = language
+            db.commit()
+            db.refresh(sp)
+        else:
+            sp = create_study_pack(
+                db,
+                source_type="youtube_video",
+                source_url=url,
+                source_id=video_id,
+                language=language,
+            )
+
         job = create_job(db, "ingest_youtube_captions", {"study_pack_id": sp.id, "video_id": video_id})
-        async_result = ingest_youtube_captions.delay(job.id, sp.id, video_id, req.language)
+        async_result = ingest_youtube_captions.delay(job.id, sp.id, video_id, language)
 
         return StudyPackFromYoutubeResponse(
             ok=True,
@@ -137,7 +173,7 @@ def create_from_youtube(req: StudyPackFromYoutubeRequest, db: Session = Depends(
             video_id=video_id,
         )
 
-    # If not a single video, try playlist
+    # 2) Playlist
     playlist_id = extract_youtube_playlist_id(url)
     if not playlist_id:
         raise HTTPException(status_code=400, detail="Invalid YouTube URL (not a video or playlist)")
@@ -146,51 +182,91 @@ def create_from_youtube(req: StudyPackFromYoutubeRequest, db: Session = Depends(
     playlist_title = meta.get("playlist_title")
     entries = meta.get("entries") or []
 
+    if not entries:
+        raise HTTPException(status_code=400, detail="Playlist has no usable video entries")
+
     created_ids: list[int] = []
+    reused_ids: list[int] = []
+
+    # Create (or reuse) packs first, commit once
     for e in entries:
         vid = e["video_id"]
         idx = e["index"]
         title = e.get("title")
+
+        # Reuse if same video already exists under same playlist_id
+        existing = (
+            db.query(StudyPack)
+            .filter(
+                and_(
+                    StudyPack.source_type == "youtube_video",
+                    StudyPack.source_id == vid,
+                    StudyPack.playlist_id == playlist_id,
+                )
+            )
+            .order_by(StudyPack.created_at.desc())
+            .first()
+        )
+
+        if existing:
+            sp = existing
+            reused_ids.append(sp.id)
+            # keep pack url aligned to playlist context
+            desired_url = build_video_url(vid, playlist_id=playlist_id, playlist_index=idx)
+            if desired_url and sp.source_url != desired_url:
+                sp.source_url = desired_url
+            if language and not sp.language:
+                sp.language = language
+            if playlist_title and not sp.playlist_title:
+                sp.playlist_title = playlist_title
+            if sp.playlist_index is None:
+                sp.playlist_index = idx
+            if title and not sp.title:
+                sp.title = title
+            continue
 
         sp = create_study_pack(
             db,
             source_type="youtube_video",
             source_url=build_video_url(vid, playlist_id=playlist_id, playlist_index=idx),
             source_id=vid,
-            language=req.language,
+            language=language,
         )
 
-        # set playlist fields + title at creation time
         sp.playlist_id = playlist_id
         sp.playlist_title = playlist_title
         sp.playlist_index = idx
         if title and not sp.title:
             sp.title = title
 
-        db.commit()
-        db.refresh(sp)
         created_ids.append(sp.id)
 
-    if not created_ids:
+    db.commit()
+
+    all_ids = reused_ids + created_ids
+    if not all_ids:
         raise HTTPException(status_code=400, detail="Playlist has no usable video entries")
 
     job = create_job(
         db,
         "ingest_youtube_playlist",
-        {"playlist_id": playlist_id, "study_pack_ids": created_ids, "url": url},
+        {"playlist_id": playlist_id, "study_pack_ids": all_ids, "url": url},
     )
-    async_result = ingest_youtube_playlist.delay(job.id, playlist_id, created_ids, req.language)
+    async_result = ingest_youtube_playlist.delay(job.id, playlist_id, all_ids, language)
 
     # Return the first pack id so current UI can auto-open /packs/:id
     return StudyPackFromYoutubeResponse(
         ok=True,
-        study_pack_id=created_ids[0],
+        study_pack_id=all_ids[0],
         job_id=job.id,
         task_id=async_result.id,
         video_id=None,
         playlist_id=playlist_id,
         playlist_title=playlist_title,
-        playlist_count=len(created_ids),
+        playlist_count=len(all_ids),
+        playlist_pack_ids=all_ids,
+        playlist_created_count=len(created_ids),
+        playlist_reused_count=len(reused_ids),
     )
 
 
