@@ -20,6 +20,21 @@ class TranscriptNotFound(Exception):
     pass
 
 
+# -----------------------------
+# Cleaning + normalization (V1.4)
+# -----------------------------
+_DEFAULT_DROP_BRACKETED = os.getenv("YLC_DROP_BRACKETED_NOISE", "1").strip() != "0"
+_DEFAULT_MIN_SEG_DUR = float(os.getenv("YLC_MIN_SEG_DUR_SEC", "0.25"))  # tiny segments get merged
+_DEFAULT_MIN_SEG_CHARS = int(os.getenv("YLC_MIN_SEG_CHARS", "4"))
+_DEFAULT_DEDUPE_WINDOW = int(os.getenv("YLC_DEDUPE_WINDOW", "1"))  # consecutive-only by default
+
+# Common non-learning caption markers like [Music], [Applause], etc.
+_NOISE_RE = re.compile(
+    r"^\s*\[(music|applause|laughter|intro|outro|silence|sfx|sound effects?)\]\s*$",
+    re.IGNORECASE,
+)
+
+
 def _proxy_dict(proxy_url: str | None) -> dict | None:
     if not proxy_url:
         return None
@@ -46,6 +61,97 @@ def _segments_to_text(segments: list[dict[str, Any]]) -> str:
     return " ".join(parts).strip()
 
 
+def _normalize_space(s: str) -> str:
+    s = (s or "").replace("\u200b", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _is_noise_text(txt: str) -> bool:
+    if not txt:
+        return True
+    if _DEFAULT_DROP_BRACKETED and _NOISE_RE.match(txt.strip()):
+        return True
+    return False
+
+
+def _canon_text(txt: str) -> str:
+    """
+    Canonical text used for dedupe decisions.
+    Keep it conservative: normalize whitespace + lowercase.
+    """
+    t = _normalize_space(txt).lower()
+    return t
+
+
+def clean_segments(
+    segments: list[dict[str, Any]],
+    *,
+    min_dur_sec: float = _DEFAULT_MIN_SEG_DUR,
+    min_chars: int = _DEFAULT_MIN_SEG_CHARS,
+    dedupe_window: int = _DEFAULT_DEDUPE_WINDOW,
+) -> list[dict[str, Any]]:
+    """
+    Clean + normalize transcript segments:
+    - strip whitespace
+    - drop common noise tokens like [Music]
+    - collapse consecutive duplicates
+    - merge tiny segments into previous segment
+    Returns segments in the same schema: {text, start, duration}
+    """
+    cleaned: list[dict[str, Any]] = []
+    recent: list[str] = []  # rolling canonical texts for dedupe decisions
+
+    for seg in segments or []:
+        raw_txt = (seg.get("text") or "").strip()
+        txt = _normalize_space(raw_txt)
+
+        if not txt:
+            continue
+        if _is_noise_text(txt):
+            continue
+
+        start = float(seg.get("start") or 0.0)
+        duration = float(seg.get("duration") or 0.0)
+        duration = max(0.0, duration)
+
+        canon = _canon_text(txt)
+
+        # consecutive / rolling dedupe
+        if dedupe_window > 0 and canon and canon in recent[-dedupe_window:]:
+            # If this is a duplicate segment, just extend the last segment's duration
+            if cleaned:
+                last = cleaned[-1]
+                last_end = float(last["start"]) + float(last["duration"])
+                this_end = start + duration
+                if this_end > last_end:
+                    last["duration"] = float(max(0.0, this_end - float(last["start"])))
+            continue
+
+        # merge tiny segments into previous (helps remove micro-chunks)
+        if cleaned and (duration < min_dur_sec or len(txt) < min_chars):
+            last = cleaned[-1]
+            # append if not already ending with same words
+            last_txt = _normalize_space(last.get("text") or "")
+            if _canon_text(last_txt) != canon:
+                merged = (last_txt + " " + txt).strip()
+                last["text"] = merged
+
+            # extend duration to cover this segment end
+            last_end = float(last["start"]) + float(last["duration"])
+            this_end = start + duration
+            if this_end > last_end:
+                last["duration"] = float(max(0.0, this_end - float(last["start"])))
+
+            recent.append(canon)
+            continue
+
+        cleaned.append({"text": txt, "start": float(start), "duration": float(duration)})
+        recent.append(canon)
+
+    return cleaned
+
+
 def _fetch_with_transcript_api(video_id: str, language: str | None) -> dict[str, Any]:
     proxies = _proxy_dict(youtube_settings.proxy_url)
     cookies = youtube_settings.cookies_file
@@ -70,7 +176,6 @@ def _fetch_with_transcript_api(video_id: str, language: str | None) -> dict[str,
     if not text:
         raise TranscriptNotFound("Transcript empty after fetch (transcript_api)")
 
-    # transcript_api segments already have: {text, start, duration}
     return {"segments": segments, "text": text, "language": used_lang or language or "unknown", "method": "captions"}
 
 
@@ -89,7 +194,6 @@ def _fetch_with_ytdlp_subs(video_id: str, language: str | None) -> dict[str, Any
     with tempfile.TemporaryDirectory() as td:
         outtmpl = str(Path(td) / "%(id)s.%(ext)s")
 
-        # Prefer requested language, else try en first then any
         sub_langs = language or "en.*"
         args = [
             "yt-dlp",
@@ -126,6 +230,7 @@ def _fetch_with_ytdlp_subs(video_id: str, language: str | None) -> dict[str, Any
             start = _vtt_timestamp_to_seconds(caption.start)
             end = _vtt_timestamp_to_seconds(caption.end)
             txt = (caption.text or "").replace("\n", " ").strip()
+            txt = _normalize_space(txt)
             if not txt:
                 continue
             segments.append({"text": txt, "start": float(start), "duration": float(max(0.0, end - start))})
@@ -173,12 +278,10 @@ def _download_audio_with_ytdlp(video_id: str, out_dir: str) -> str:
     if p.returncode != 0:
         raise TranscriptNotFound(f"yt-dlp audio failed: {p.stderr.strip() or p.stdout.strip()}")
 
-    # find the downloaded file (video_id.*)
     candidates = list(Path(out_dir).glob(f"{video_id}.*"))
     if not candidates:
         raise TranscriptNotFound("yt-dlp audio succeeded but could not find output audio file")
 
-    # pick largest
     audio_path = str(sorted(candidates, key=lambda x: x.stat().st_size, reverse=True)[0])
     return audio_path
 
@@ -190,7 +293,6 @@ def _normalize_to_wav(input_audio_path: str, out_dir: str) -> str:
     ffmpeg = _ensure_ffmpeg()
     out_wav = str(Path(out_dir) / "audio_16k_mono.wav")
 
-    # -vn remove video; -ac 1 mono; -ar 16000 sample rate
     args = [
         ffmpeg,
         "-y",
@@ -239,7 +341,6 @@ def fetch_youtube_transcript(video_id: str, language: str | None = None) -> dict
     """
     last_err: Exception | None = None
 
-    # 1) captions-first
     for attempt in range(1, youtube_settings.max_retries + 1):
         try:
             return _fetch_with_transcript_api(video_id, language)
@@ -249,14 +350,12 @@ def fetch_youtube_transcript(video_id: str, language: str | None = None) -> dict
                 time.sleep(youtube_settings.backoff_sec * attempt)
             continue
 
-    # 2) yt-dlp subtitles fallback
     if youtube_settings.enable_ytdlp_fallback:
         try:
             return _fetch_with_ytdlp_subs(video_id, language)
         except Exception as e:
             last_err = e
 
-    # 3) STT fallback
     if getattr(youtube_settings, "enable_stt_fallback", True):
         try:
             return _fetch_with_stt(video_id, language)
