@@ -1,277 +1,354 @@
-# YouTube Learning Copilot
-
-Turn any YouTube video into a **structured study pack**: ingest the transcript, then generate a **summary, key takeaways, chapters, flashcards, and a quiz**. This repo is intentionally simple and “local-first” so you can iterate quickly on both the **learning output quality** and the **UI experience**.
-
----
-
-## Problem statement
-
-When you learn from YouTube, your “study flow” is usually scattered:
-
-- you watch long videos,
-- you take notes manually,
-- you forget context a week later,
-- and there’s no clean way to review what mattered.
-
-**YouTube Learning Copilot** solves this by converting a video transcript into a study pack with reusable learning materials. Instead of the transcript dump, you get **digestible learning artifacts** that are easy to read, revise, and revisit.
+# YouTube Learning Copilot 🎥📚  
+*A local-first learning copilot that turns any YouTube video into a structured study pack — with progress tracking for chapters, flashcards, and quizzes.*
 
 ---
 
-## What we’ve built so far (current scope / V0)
+## Why I built this ✨
 
-This is what is implemented and working end-to-end right now:
+I wanted a **local, fast, distraction-free** way to learn from long YouTube lectures without constantly re-watching or losing context.  
+Most learning happens after you watch the video — when you revise, test yourself, and track what you’ve actually understood.
 
-### 1) Study pack creation + transcript ingestion (async)
-You provide a YouTube URL and language, and the backend starts an ingestion job. When ingestion completes, the UI automatically routes you to the study pack page.
+So I built **YouTube Learning Copilot** as a **local-first study system**:
 
-### 2) Study material generation (async)
-From the ingested transcript, the backend generates:
+- ✅ Ingest a YouTube video into a **Study Pack**
+- ✅ Generate structured learning materials (summary, chapters, flashcards, quiz)
+- ✅ Study via dedicated UIs
+- ✅ Persist learning progress in Postgres so it survives refreshes & sessions
+- ✅ Keep the architecture clean enough to extend into RAG/Q&A, exports, and sharing later
+
+---
+
+## What the product does (today) ✅
+
+### 1) Study Pack creation (YouTube → Pack) 📦
+A **Study Pack** is the unit of learning. Each pack represents one ingested video (and later: playlists).
+
+It stores:
+- video URL, metadata and ingestion status
+- transcript text / chunks (foundation)
+- generated study materials
+
+---
+
+### 2) Material generation pipeline ⚙️🧠
+From the transcript, the backend generates:
 
 - **Summary**
-- **Key takeaways**
-- **Chapters**
-- **Flashcards**
-- **Quiz (MCQ)**
+- **Key Takeaways**
+- **Chapters** (title + summary + optional sentences)
+- **Flashcards** (Q/A)
+- **Quiz** (MCQs + correct answers)
 
-This runs via a Celery worker and stores results in Postgres.
-
-### 3) Provider support: OpenAI + fallback heuristics
-Study material generation supports:
-
-- **OpenAI provider** (LLM-generated, synthesized outputs)
-- **Heuristic fallback** (deterministic, non-LLM generator)
-
-We also added **debug metadata (`_meta`)** stored in `content_json` so we can prove which provider ran and why (e.g., OpenAI failures, timeouts, model used, transcript length).
-
-### 4) Web UI (Next.js) with “glass UI” direction
-You currently have:
-
-- A landing page for URL + language input
-- A pack page with:
-  - pack info
-  - generation actions (refresh / generate)
-  - materials rendered by kind
-
-The UI was recently improved toward a glassmorphism style and is now stable again.
+These are stored as `StudyMaterial` rows in Postgres and can be browsed on the pack page.
 
 ---
 
-## Tech stack
+### 3) Study mode + progress tracking 🧩✅
+This is what I focused on heavily in the latest implementation.
 
-### Backend
-- **FastAPI** (API server)
-- **Celery** (async job execution)
-- **Postgres** (persistence)
-- **SQLAlchemy** (ORM)
-- **OpenAI** (optional provider for study material generation)
+#### Flashcards study 📇
+- Flip card
+- Mark:
+  - Known ✅
+  - Review later 🕒
+  - Reset ↩️
+- Progress persists to DB:
+  - seen_count, known_count, review_later_count
+  - last_seen_at
+  - current status
+
+#### Quiz study 📝
+- Mark question:
+  - Correct ✅
+  - Wrong ❌
+  - Reset ↩️
+- Persisted stats:
+  - seen_count, correct_count, wrong_count
+  - last_seen_at
+  - current status (correct/wrong/null)
+
+#### Chapters study 📖
+- Open chapter (in-progress)
+- Complete chapter ✅
+- Reset ↩️
+- Persisted fields:
+  - opened_count, completed_count
+  - last_opened_at, last_completed_at
+  - status (in_progress/completed/null)
+- Also provides:
+  - **resume_chapter_index** (best next chapter to continue)
+
+---
+
+## What’s implemented version-wise 🚀
+
+### ✅ V1 — Ingestion + generation foundation
+Done:
+- Study pack ingestion baseline
+- Job queue pattern (create job → worker runs → UI polls)
+- Materials generation: summary, takeaways, chapters, flashcards, quiz
+- Pack page: browse materials cleanly
+
+Still pending in V1:
+- playlist ingestion fanout (create packs per playlist item)
+- hardened captions-first → STT fallback orchestration
+- canonical timestamped transcript chunk storage
+
+---
+
+### ✅ V2 — Study experience (progress + study hub)
+Done in V2 so far:
+- Flashcards progress DB + APIs + study UI ✅
+- Quiz progress DB + APIs + study UI ✅
+- Chapters progress DB + APIs + study UI ✅
+- Pack page CTAs to study pages ✅
+
+Still pending in V2 (actual “RAG + Q&A”):
+- embeddings + pgvector pipeline
+- retrieval endpoint with citations
+- transcript-grounded chat endpoint with “not in video” refusal
+
+---
+
+### ⏳ V3 — Attempts + advanced outputs
+Planned:
+- Notes variants: short/structured/detailed/glossary
+- Quiz types: multi-select, T/F, fill-blank, short answer
+- Attempts + scoring + explanations
+- Mock tests (timed + blueprint coverage)
+
+---
+
+### ⏳ V4 — Exports + sharing + ops polish
+Planned:
+- PDF/Markdown export
+- share links (view-only / attempt-only)
+- usage counters + moderation flags (analytics removed)
+
+---
+
+## Tech stack 🧱
 
 ### Frontend
-- **Next.js (App Router)** for the web UI
-- Tailwind is available via `@import "tailwindcss"` (styling currently mixes inline + CSS)
+- Next.js + TypeScript
+- Tailwind CSS
+
+### Backend
+- FastAPI (Python)
+- SQLAlchemy
+- Pydantic
+
+### DB / infra (local)
+- PostgreSQL (Docker)
+- Redis (for job queue / workers)
 
 ---
 
-## High-level architecture
+## Repo structure 🗂️
 
-A simple async pipeline with two phases:
-
-1) **Ingest**
-- create study pack → queue ingestion task → store transcript in DB → mark pack as `ingested`
-
-2) **Generate**
-- create “generate materials” job → queue generation task → generate + validate payload → upsert 5 material rows
-
----
-
-## Key API endpoints
-
-### Create a study pack from YouTube
-```bash
-curl -s -X POST "http://localhost:8000/study-packs/from-youtube"   -H "Content-Type: application/json"   -d '{"url":"https://www.youtube.com/watch?v=VIDEO_ID","language":"en"}' | python -m json.tool
-```
-
-### Get a job status
-```bash
-curl -s "http://localhost:8000/jobs/<job_id>" | python -m json.tool
-```
-
-### Generate study materials for a pack
-```bash
-curl -s -X POST "http://localhost:8000/study-packs/<study_pack_id>/generate" | python -m json.tool
-```
-
-### Fetch generated materials
-```bash
-curl -s "http://localhost:8000/study-packs/<study_pack_id>/materials" | python -m json.tool
+```txt
+youtube-learning-copilot/
+  apps/
+    api/
+      app/
+        api/                # FastAPI routers
+        models/             # SQLAlchemy models
+        services/           # Business logic (flashcards/quizzes/chapters)
+        worker/             # Background tasks
+    web/
+      src/
+        app/
+          packs/
+            [id]/           # Pack page (browse + study hub CTAs)
+            [id]/study/
+              flashcards/   # Flashcards study UI
+              quiz/         # Quiz study UI
+              chapters/     # Chapters study UI
+        lib/api.ts          # Typed API client
 ```
 
 ---
 
-## Local setup (step-by-step)
+## Database tables added in V2 🧾
 
-### 1) Backend setup
+### Flashcards progress
+```sql
+CREATE TABLE IF NOT EXISTS study_flashcard_progress (
+  id BIGSERIAL PRIMARY KEY,
+  study_pack_id BIGINT NOT NULL,
+  card_index INT NOT NULL,
+  status VARCHAR(32) NULL,
+  seen_count INT NOT NULL DEFAULT 0,
+  known_count INT NOT NULL DEFAULT 0,
+  review_later_count INT NOT NULL DEFAULT 0,
+  last_seen_at TIMESTAMPTZ NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(study_pack_id, card_index)
+);
+```
+
+### Quiz progress
+```sql
+CREATE TABLE IF NOT EXISTS study_quiz_progress (
+  id BIGSERIAL PRIMARY KEY,
+  study_pack_id BIGINT NOT NULL,
+  question_index INT NOT NULL,
+  status VARCHAR(32) NULL,
+  seen_count INT NOT NULL DEFAULT 0,
+  correct_count INT NOT NULL DEFAULT 0,
+  wrong_count INT NOT NULL DEFAULT 0,
+  last_seen_at TIMESTAMPTZ NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(study_pack_id, question_index)
+);
+```
+
+### Chapters progress
+```sql
+CREATE TABLE IF NOT EXISTS study_chapter_progress (
+  id BIGSERIAL PRIMARY KEY,
+  study_pack_id BIGINT NOT NULL,
+  chapter_index INT NOT NULL,
+  status VARCHAR(32) NULL,
+  opened_count INT NOT NULL DEFAULT 0,
+  completed_count INT NOT NULL DEFAULT 0,
+  last_opened_at TIMESTAMPTZ NULL,
+  last_completed_at TIMESTAMPTZ NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(study_pack_id, chapter_index)
+);
+```
+
+---
+
+## Key APIs (what I use from the frontend) 🔌
+
+### Materials
+- `GET /study-packs/{id}/materials` → fetch all generated materials  
+- `POST /study-packs/{id}/generate` → trigger generation job
+
+### Flashcards progress
+- `GET /study-packs/{id}/flashcards/progress`
+- `POST /study-packs/{id}/flashcards/progress`
+  ```json
+  {"card_index": 0, "action": "known"} 
+  ```
+
+### Quiz progress
+- `GET /study-packs/{id}/quiz/progress`
+- `POST /study-packs/{id}/quiz/progress`
+  ```json
+  {"question_index": 0, "action": "correct"}
+  ```
+
+### Chapters progress
+- `GET /study-packs/{id}/chapters/progress`
+- `POST /study-packs/{id}/chapters/progress`
+  ```json
+  {"chapter_index": 0, "action": "complete"}
+  ```
+
+---
+
+## How progress logic works (high level) 🧠
+
+### ✅ “Progress is derived from generated material count”
+For flashcards/quiz/chapters, I don’t store total counts in DB.  
+Instead:
+- I load the generated material (from `StudyMaterial.kind`)
+- derive total cards/questions/chapters from that JSON
+- then read progress rows and merge into a complete index-aligned list
+
+This keeps it clean: if generation changes, progress still maps correctly by index.
+
+---
+
+## Local setup (quickstart) 🏁
+
+> Assumes you already have Python + Node + Docker installed.
+
+### 1) Start infra (Postgres + Redis)
 ```bash
-cd ~/youtube-learning-copilot/apps/api
+docker compose up -d
+```
+
+### 2) Backend
+```bash
+cd apps/api
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-Create `.env` (example keys):
-```bash
-# Database
-DATABASE_URL="postgresql+psycopg://ylc:ylc@localhost:5433/ylc"
-
-# Providers
-STUDY_MATERIALS_PROVIDER="openai"   # or "heuristic"
-
-# OpenAI (only if provider=openai)
-OPENAI_API_KEY="your_key_here"
-OPENAI_MODEL="gpt-4o-mini"
-```
-
-Run the API:
-```bash
-cd ~/youtube-learning-copilot/apps/api
-source .venv/bin/activate
-set -a; source .env; set +a
-
 uvicorn app.main:app --reload --port 8000
 ```
 
-### 2) Start the Celery worker
-In another terminal:
+### 3) Frontend
 ```bash
-cd ~/youtube-learning-copilot/apps/api
-source .venv/bin/activate
-set -a; source .env; set +a
-
-celery -A app.worker.celery_app:celery_app worker -l info
-```
-
-### 3) Frontend setup
-```bash
-cd ~/youtube-learning-copilot/apps/web
+cd apps/web
 npm install
 npm run dev
 ```
 
 Open:
-- Web UI: `http://localhost:3000`
+- Web: `http://localhost:3000`
 - API: `http://localhost:8000`
 
 ---
 
-## What we fixed during implementation (important learnings)
+## How I test quickly ✅
 
-### 1) “OpenAI path not used” bug (provider import / symbol missing)
-At one point, the Celery worker was always producing heuristic-style outputs, and OpenAI generation was not being executed. We diagnosed this by checking whether the `generate_study_materials_openai` symbol existed in the module and then fixing the import pathway so the provider implementation lives in:
-
-- `apps/api/app/services/llm/openai_client.py`
-- `apps/api/app/services/llm/prompts.py`
-
-…and is imported from `app.services.study_materials.generate_and_store_all()` when `STUDY_MATERIALS_PROVIDER=openai`.
-
-### 2) OpenAI SDK mismatch (`response_format` error)
-We hit this runtime issue:
-> `Responses.create() got an unexpected keyword argument 'response_format'`
-
-That was caused by a mismatch between the SDK usage and the installed OpenAI python package version. We adjusted the client code to align with the SDK version in the repo (and added robust error handling + fallback).
-
-### 3) Timeouts + safe fallback
-We observed OpenAI timeouts when transcripts were large. The system now:
-
-- records `openai_error` in `_meta`
-- falls back to heuristic generation
-- still stores usable study materials, so the UI never breaks
-
-### 4) Debug metadata `_meta` for every material row
-Every material `content_json` now carries a `_meta` block like:
-
-```json
-{
-  "_meta": {
-    "requested_provider": "openai",
-    "provider": "openai",
-    "openai_model": "gpt-4o-mini",
-    "openai_error": null,
-    "transcript_len": 13912,
-    "transcript_clean_len": 10111
-  }
-}
+### Materials present?
+```bash
+curl -s "http://localhost:8000/study-packs/87/materials" | python -m json.tool
 ```
 
-This makes it easy to debug “what happened” using SQL:
+### Flashcards progress
+```bash
+curl -s "http://localhost:8000/study-packs/87/flashcards/progress" | python -m json.tool
+curl -s -X POST "http://localhost:8000/study-packs/87/flashcards/progress" \
+  -H "Content-Type: application/json" \
+  -d '{"card_index":0,"action":"known"}' | python -m json.tool
+```
 
-```sql
-SELECT kind, status,
-       (content_json::jsonb->'_meta'->>'requested_provider') AS requested_provider,
-       (content_json::jsonb->'_meta'->>'provider') AS provider,
-       (content_json::jsonb->'_meta'->>'openai_model') AS model,
-       (content_json::jsonb->'_meta'->>'openai_error') AS openai_error
-FROM study_materials
-WHERE study_pack_id = 25
-ORDER BY kind;
+### Quiz progress
+```bash
+curl -s "http://localhost:8000/study-packs/87/quiz/progress" | python -m json.tool
+curl -s -X POST "http://localhost:8000/study-packs/87/quiz/progress" \
+  -H "Content-Type: application/json" \
+  -d '{"question_index":0,"action":"correct"}' | python -m json.tool
+```
+
+### Chapters progress
+```bash
+curl -s "http://localhost:8000/study-packs/87/chapters/progress" | python -m json.tool
+curl -s -X POST "http://localhost:8000/study-packs/87/chapters/progress" \
+  -H "Content-Type: application/json" \
+  -d '{"chapter_index":0,"action":"open"}' | python -m json.tool
 ```
 
 ---
 
-## Outcome so far
-
-- End-to-end flow works: **URL → ingest → pack page → generate → materials render**
-- Outputs are now **synthesized** (when OpenAI succeeds), not transcript dumps
-- Strong debugging visibility via `_meta`
-- UI is functional and aligned to a “glass UI” direction (can be improved further)
-
----
-
-## What we defined for V1 (next scope)
-
-We haven’t formally “locked” V1 in a single written spec inside this conversation excerpt. Based on the current V0 state and your stated direction (“UI needs to be improved a lot” + “landing-page feel” + “glassmorphism”), this is the V1 definition you can use going forward:
-
-### A) Learning output quality (core)
-1. **Chunked generation (map-reduce)** for long transcripts to reduce timeouts and improve coverage.
-2. **Stronger validations** to prevent transcript dumps and enforce length/count constraints.
-3. **Retry strategy**: retry OpenAI with smaller chunks before falling back to heuristic.
-4. **Configurable model/provider** with safe defaults.
-
-### B) UX / UI (core)
-1. A real **landing-page style** home with clearer hierarchy and CTA.
-2. **Consistent glassmorphism** across all surfaces (inputs, buttons, cards, sections).
-3. Better material consumption:
-   - tabs/segmented controls
-   - improved reading spacing and typography
-   - collapsible details where needed
-4. Better progress + empty states during ingest/generate.
-
-### C) Product features (high leverage)
-1. **Export** pack to Markdown/PDF.
-2. **Shareable pack links**.
-3. **Recent packs list** page.
-
-### D) Hardening
-1. Improved error surfacing in UI (clean + user-friendly).
-2. Basic job/material logs for debugging.
+## What I’ll build next 🔜 (Study Hub + RAG)
+- A unified **Study Hub** home inside each pack:
+  - continue where I left off (chapters resume)
+  - quick actions: flashcards / quiz / chapters
+  - progress summaries in one place
+- Then start the true V2:
+  - transcript chunk embeddings
+  - citations-first retrieval
+  - grounded chat/Q&A with “not in video” refusal
 
 ---
 
-## Repo structure (relevant parts)
-
-Backend:
-- `apps/api/app/main.py` – FastAPI app + CORS
-- `apps/api/app/api/study_materials.py` – generate + materials endpoints
-- `apps/api/app/services/study_materials.py` – provider orchestration + validation + DB upsert
-- `apps/api/app/services/llm/openai_client.py` – OpenAI call logic
-- `apps/api/app/services/llm/prompts.py` – prompts
-- `apps/api/app/worker/*` – Celery tasks
-
-Frontend:
-- `apps/web/src/app/page.tsx` – landing/create flow
-- `apps/web/src/app/packs/[id]/page.tsx` – pack viewer + generate
-- `apps/web/src/lib/api.ts` – typed API client
+## Notes / constraints 🧩
+- All progress currently maps by **index** (card_index/question_index/chapter_index).
+- If a pack regenerates and changes ordering, old progress remains but may not map perfectly.
+  - Later I can attach stable IDs/hashes to generated items.
 
 ---
 
-## Notes
-- This README captures what is **implemented today** plus the **V1 scope definition** aligned to your product direction.
-- If you want, we can convert the V1 scope into a PRD checklist + step-by-step execution plan with git commits per step.
+## Credits 🙌
+Built as a local-first learning tool to make YouTube studying structured, trackable, and actually effective.
+

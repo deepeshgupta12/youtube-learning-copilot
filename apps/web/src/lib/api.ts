@@ -97,6 +97,30 @@ export type QuizMarkRequest = {
   action: "correct" | "wrong" | "reset" | "seen";
 };
 
+export type ChapterProgressItem = {
+  chapter_index: number;
+  status: "in_progress" | "completed" | null;
+  opened_count: number;
+  completed_count: number;
+  last_opened_at: string | null;
+  last_completed_at: string | null;
+};
+
+export type ChapterProgressResponse = {
+  ok: boolean;
+  study_pack_id: number;
+  total_chapters: number;
+  opened_chapters: number;
+  completed_chapters: number;
+  resume_chapter_index: number;
+  items: ChapterProgressItem[];
+};
+
+export type ChapterMarkRequest = {
+  chapter_index: number;
+  action: "open" | "complete" | "reset";
+};
+
 export type StudyMaterialRow = {
   id: number;
   kind: "summary" | "key_takeaways" | "chapters" | "flashcards" | "quiz" | string;
@@ -354,4 +378,20 @@ export async function listTranscriptChunks(args: {
   qs.set("limit", String(args.limit ?? 50));
   qs.set("offset", String(args.offset ?? 0));
   return apiFetch(`/study-packs/${args.studyPackId}/transcript/chunks?${qs.toString()}`);
+=======
+export async function getChapterProgress(studyPackId: number): Promise<ChapterProgressResponse> {
+  return apiFetch<ChapterProgressResponse>(
+    `/study-packs/${studyPackId}/chapters/progress`,
+    { method: "GET" }
+  );
+}
+
+export async function markChapterProgress(
+  studyPackId: number,
+  req: ChapterMarkRequest
+): Promise<ChapterProgressResponse> {
+  return apiFetch<ChapterProgressResponse>(
+    `/study-packs/${studyPackId}/chapters/progress`,
+    { method: "POST", body: JSON.stringify(req) }
+  );
 }

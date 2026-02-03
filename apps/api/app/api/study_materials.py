@@ -13,6 +13,7 @@ from app.services.flashcards import get_flashcards_progress, mark_flashcard
 from app.services.jobs import create_job
 from app.services.quizzes import get_quiz_progress, mark_quiz_question
 from app.worker.generate_tasks import generate_study_materials
+from app.services.chapters import get_chapters_progress, mark_chapter
 
 router = APIRouter(prefix="/study-packs", tags=["study_materials"])
 
@@ -22,6 +23,20 @@ class GenerateStudyMaterialsResponse(BaseModel):
     study_pack_id: int
     job_id: int
     task_id: str
+
+class ChapterProgressResponse(BaseModel):
+    ok: bool
+    study_pack_id: int
+    total_chapters: int
+    opened_chapters: int
+    completed_chapters: int
+    resume_chapter_index: int
+    items: list[dict]
+
+
+class ChapterMarkRequest(BaseModel):
+    chapter_index: int
+    action: str  # open | complete | reset
 
 
 # -----------------------
@@ -157,5 +172,26 @@ def quiz_mark(
     try:
         p = mark_quiz_question(db, study_pack_id, req.question_index, req.action)
         return QuizProgressResponse(ok=True, **p)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
+@router.get("/{study_pack_id}/chapters/progress", response_model=ChapterProgressResponse)
+def chapters_progress(study_pack_id: int, db: Session = Depends(get_db)) -> ChapterProgressResponse:
+    try:
+        p = get_chapters_progress(db, study_pack_id)
+        return ChapterProgressResponse(ok=True, **p)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{study_pack_id}/chapters/progress", response_model=ChapterProgressResponse)
+def chapters_mark(
+    study_pack_id: int,
+    req: ChapterMarkRequest,
+    db: Session = Depends(get_db),
+) -> ChapterProgressResponse:
+    try:
+        p = mark_chapter(db, study_pack_id, req.chapter_index, req.action)
+        return ChapterProgressResponse(ok=True, **p)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
