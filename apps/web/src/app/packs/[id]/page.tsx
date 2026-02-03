@@ -279,6 +279,17 @@ export default function PackPage() {
         </Link>
 
         <div className="flex gap-2">
+          <Link
+            href={`/packs/${studyPackId}/study/flashcards`}
+            className={[
+              "rounded-xl border border-white/15 bg-white/5 px-4 py-2 text-xs",
+              "text-white/85 hover:bg-white/8",
+              loading ? "pointer-events-none opacity-50" : "",
+            ].join(" ")}
+          >
+            Study Flashcards
+          </Link>
+
           <button
             onClick={refreshAll}
             disabled={loading || running}
