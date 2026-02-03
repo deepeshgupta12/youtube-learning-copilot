@@ -26,15 +26,24 @@ export default function JobPage() {
   const [job, setJob] = useState<JobGetResponse | null>(null);
   const [payload, setPayload] = useState<any>(null);
 
-  const [loading, setLoading] = useState(true);
+  // ✅ start NOT loading; we’ll set loading=true only when we actually fetch
+  const [loading, setLoading] = useState(false);
   const [polling, setPolling] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   async function loadOnce() {
     if (!jobId) return;
-    const j = await getJob(jobId);
-    setJob(j);
-    setPayload(safeJsonParse(j.payload_json || ""));
+    setErr(null);
+    setLoading(true);
+    try {
+      const j = await getJob(jobId);
+      setJob(j);
+      setPayload(safeJsonParse(j.payload_json || ""));
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function loadAndPollIfNeeded() {
@@ -60,6 +69,13 @@ export default function JobPage() {
     }
   }
 
+  // ✅ AUTO LOAD on page open (this was missing)
+  useEffect(() => {
+    if (!jobId) return;
+    loadAndPollIfNeeded();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId]);
+
   const progress = payload?.progress || null;
   const stage = progress?.stage || "-";
   const done = typeof progress?.done === "number" ? progress.done : null;
@@ -82,23 +98,21 @@ export default function JobPage() {
             disabled={loading || polling}
             className="rounded-xl border border-white/15 bg-white/5 px-4 py-2 text-xs text-white/85 hover:bg-white/8 disabled:opacity-50"
           >
-            Refresh
+            {loading ? "Refreshing..." : "Refresh"}
           </button>
           <button
             onClick={loadAndPollIfNeeded}
             disabled={loading || polling}
             className="rounded-xl border border-white/15 bg-white/10 px-4 py-2 text-xs text-white hover:bg-white/15 disabled:opacity-50"
           >
-            Poll until done
+            {polling ? "Polling..." : "Poll until done"}
           </button>
         </div>
       </div>
 
       <div className="mt-6">
         <h1 className="text-3xl font-semibold text-white">Job #{jobId}</h1>
-        <p className="mt-2 text-sm text-white/60">
-          Track ingestion / playlist / materials generation progress.
-        </p>
+        <p className="mt-2 text-sm text-white/60">Track ingestion / playlist / materials generation progress.</p>
       </div>
 
       {err && (
@@ -115,7 +129,7 @@ export default function JobPage() {
           </div>
           <div className="p-5">
             {!job ? (
-              <div className="text-sm text-white/60">Loading…</div>
+              <div className="text-sm text-white/60">{loading ? "Loading…" : "No data yet."}</div>
             ) : (
               <div className="grid gap-2">
                 <div className="text-sm text-white/85">
@@ -123,9 +137,7 @@ export default function JobPage() {
                 </div>
                 <div className="text-sm text-white/85">
                   Stage: <span className="font-semibold text-white">{stage}</span>
-                  {done !== null && total !== null ? (
-                    <span className="text-white/60">{" "}({done}/{total})</span>
-                  ) : null}
+                  {done !== null && total !== null ? <span className="text-white/60"> ({done}/{total})</span> : null}
                 </div>
                 <div className="text-sm text-white/85">
                   Error: <span className="text-white/70">{job.error || "-"}</span>
