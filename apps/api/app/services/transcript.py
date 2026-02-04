@@ -21,19 +21,19 @@ class TranscriptNotFound(Exception):
 
 
 # -----------------------------
-# Cleaning + normalization (V1.4.1)
+# Cleaning + normalization (V1.4.6)
 # -----------------------------
 _DEFAULT_DROP_BRACKETED = os.getenv("YLC_DROP_BRACKETED_NOISE", "1").strip() != "0"
 _DEFAULT_MIN_SEG_DUR = float(os.getenv("YLC_MIN_SEG_DUR_SEC", "0.25"))  # tiny segments get merged
 _DEFAULT_MIN_SEG_CHARS = int(os.getenv("YLC_MIN_SEG_CHARS", "4"))
 _DEFAULT_DEDUPE_WINDOW = int(os.getenv("YLC_DEDUPE_WINDOW", "1"))  # consecutive-only by default
 
+# Rolling-caption overlap stripping
+_DEFAULT_OVERLAP_MAX_WORDS = int(os.getenv("YLC_OVERLAP_MAX_WORDS", "18"))
+_DEFAULT_OVERLAP_MIN_WORDS = int(os.getenv("YLC_OVERLAP_MIN_WORDS", "4"))
+
 _NOISE_WORDS = r"(music|applause|laughter|intro|outro|silence|sfx|sound effects?)"
-
-# matches full-line noise: "[Music]"
 _NOISE_FULL_RE = re.compile(rf"^\s*\[{_NOISE_WORDS}\]\s*$", re.IGNORECASE)
-
-# strips leading noise prefix: "[Music] hello" -> "hello"
 _NOISE_PREFIX_RE = re.compile(rf"^\s*(?:\[{_NOISE_WORDS}\]\s*)+", re.IGNORECASE)
 
 _word_re = re.compile(r"[A-Za-z0-9']+")
@@ -57,7 +57,7 @@ def _collapse_consecutive_phrase_repeats(
       "structure is what it's made up of structure is what it's made up of"
       -> "structure is what it's made up of"
 
-    Works on word tokens to be punctuation/case tolerant.
+    Useful when a single caption line duplicates itself.
     """
     original = text
     t = " ".join((text or "").split()).strip()
@@ -77,7 +77,6 @@ def _collapse_consecutive_phrase_repeats(
         while i < n:
             best_k = 0
 
-            # Try longer phrase sizes first for stronger collapse
             for k in range(min(max_words, (n - i) // 2), min_words - 1, -1):
                 a = toks[i : i + k]
                 b = toks[i + k : i + 2 * k]
@@ -90,7 +89,6 @@ def _collapse_consecutive_phrase_repeats(
                 out.extend(phrase)
                 i += best_k
 
-                # Skip additional consecutive repeats of the same phrase
                 while i + best_k <= n and _words(" ".join(toks[i : i + best_k])) == _words(" ".join(phrase)):
                     i += best_k
 
@@ -106,6 +104,76 @@ def _collapse_consecutive_phrase_repeats(
 
     collapsed = " ".join(toks).strip()
     return collapsed if collapsed else original
+
+
+def _normalize_space(s: str) -> str:
+    s = (s or "").replace("\u200b", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _strip_noise_prefix(txt: str) -> str:
+    if not _DEFAULT_DROP_BRACKETED:
+        return txt
+    return _NOISE_PREFIX_RE.sub("", txt).strip()
+
+
+def _is_noise_text(txt: str) -> bool:
+    if not txt:
+        return True
+    if _DEFAULT_DROP_BRACKETED and _NOISE_FULL_RE.match(txt.strip()):
+        return True
+    return False
+
+
+def _canon_text(txt: str) -> str:
+    return _normalize_space(txt).lower()
+
+
+def _strip_leading_word_overlap(
+    prev_text: str,
+    cur_text: str,
+    *,
+    max_words: int,
+    min_words: int,
+) -> str:
+    """
+    Rolling captions often repeat the tail of the previous caption at the head of the next.
+    We remove the largest word-overlap:
+      suffix(prev_words, k) == prefix(cur_words, k)
+    for k in [max_words..min_words].
+
+    Returns possibly-trimmed cur_text.
+    """
+    if not prev_text or not cur_text:
+        return cur_text
+
+    pw = _words(prev_text)
+    cw = _words(cur_text)
+    if not pw or not cw:
+        return cur_text
+
+    max_k = min(max_words, len(pw), len(cw))
+    if max_k < min_words:
+        return cur_text
+
+    overlap_k = 0
+    for k in range(max_k, min_words - 1, -1):
+        if pw[-k:] == cw[:k]:
+            overlap_k = k
+            break
+
+    if overlap_k <= 0:
+        return cur_text
+
+    # Trim from the ORIGINAL tokenization of cur_text (preserve punctuation-ish spacing)
+    # We do a simple split trim; good enough because subtitles are mostly plain words.
+    cur_tokens = (cur_text or "").split()
+    if len(cur_tokens) <= overlap_k:
+        return ""
+
+    trimmed = " ".join(cur_tokens[overlap_k:]).strip()
+    return trimmed
 
 
 def _proxy_dict(proxy_url: str | None) -> dict | None:
@@ -133,47 +201,24 @@ def _segments_to_text(segments: list[dict[str, Any]]) -> str:
     return " ".join(parts).strip()
 
 
-def _normalize_space(s: str) -> str:
-    s = (s or "").replace("\u200b", " ")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-
-def _strip_noise_prefix(txt: str) -> str:
-    if not _DEFAULT_DROP_BRACKETED:
-        return txt
-    return _NOISE_PREFIX_RE.sub("", txt).strip()
-
-
-def _is_noise_text(txt: str) -> bool:
-    if not txt:
-        return True
-    if _DEFAULT_DROP_BRACKETED and _NOISE_FULL_RE.match(txt.strip()):
-        return True
-    return False
-
-
-def _canon_text(txt: str) -> str:
-    t = _normalize_space(txt).lower()
-    return t
-
-
 def clean_segments(
     segments: list[dict[str, Any]],
     *,
     min_dur_sec: float = _DEFAULT_MIN_SEG_DUR,
     min_chars: int = _DEFAULT_MIN_SEG_CHARS,
     dedupe_window: int = _DEFAULT_DEDUPE_WINDOW,
+    overlap_max_words: int = _DEFAULT_OVERLAP_MAX_WORDS,
+    overlap_min_words: int = _DEFAULT_OVERLAP_MIN_WORDS,
 ) -> list[dict[str, Any]]:
     """
     Clean + normalize transcript segments:
     - normalize spaces
     - strip leading bracketed noise prefix like "[Music] ..."
     - drop pure noise tokens like "[Music]"
-    - collapse consecutive repeated phrases inside a segment (rolling captions echo)
+    - strip rolling-caption overlap vs previous kept segment (word-based)
+    - collapse consecutive repeated phrases inside a segment
     - collapse consecutive duplicates (rolling dedupe)
     - merge tiny segments into previous segment
-
     Returns segments in schema: {text, start, duration}
     """
     cleaned: list[dict[str, Any]] = []
@@ -182,7 +227,6 @@ def clean_segments(
     for seg in segments or []:
         raw_txt = (seg.get("text") or "").strip()
         txt = _normalize_space(raw_txt)
-
         if not txt:
             continue
 
@@ -195,21 +239,39 @@ def clean_segments(
         if _is_noise_text(txt):
             continue
 
-        # NEW: collapse repeated phrases inside the same segment
+        start = float(seg.get("start") or 0.0)
+        duration = float(seg.get("duration") or 0.0)
+        duration = max(0.0, duration)
+
+        # NEW: rolling-caption overlap stripping against previous kept segment
+        if cleaned:
+            prev_txt = cleaned[-1].get("text") or ""
+            txt = _strip_leading_word_overlap(
+                prev_txt,
+                txt,
+                max_words=overlap_max_words,
+                min_words=overlap_min_words,
+            )
+            txt = _normalize_space(txt)
+            if not txt:
+                # nothing new in this caption; extend timing coverage on last segment
+                last = cleaned[-1]
+                last_end = float(last["start"]) + float(last["duration"])
+                this_end = start + duration
+                if this_end > last_end:
+                    last["duration"] = float(max(0.0, this_end - float(last["start"])))
+                continue
+
+        # Collapse phrase repeats inside the SAME segment (rare but happens)
         txt = _collapse_consecutive_phrase_repeats(txt, min_words=3, max_words=10, max_passes=6)
         txt = _normalize_space(txt)
         if not txt:
             continue
 
-        start = float(seg.get("start") or 0.0)
-        duration = float(seg.get("duration") or 0.0)
-        duration = max(0.0, duration)
-
         canon = _canon_text(txt)
 
         # rolling dedupe (consecutive by default)
         if dedupe_window > 0 and canon and canon in recent[-dedupe_window:]:
-            # extend last segment duration to cover this segment
             if cleaned:
                 last = cleaned[-1]
                 last_end = float(last["start"]) + float(last["duration"])
