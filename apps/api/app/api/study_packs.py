@@ -19,6 +19,9 @@ from app.services.youtube import (
 from app.worker.ingest_tasks import ingest_youtube_captions, ingest_youtube_playlist
 from app.worker.embedding_tasks import embed_transcript_chunks  # Celery task
 
+# ✅ V2.2 Retrieval service
+from app.services.kb_search import kb_search_chunks
+
 router = APIRouter(prefix="/study-packs", tags=["study_packs"])
 
 
@@ -115,7 +118,10 @@ def list_study_packs(
 
 
 @router.post("/from-youtube", response_model=StudyPackFromYoutubeResponse)
-def create_from_youtube(req: StudyPackFromYoutubeRequest, db: Session = Depends(get_db)) -> StudyPackFromYoutubeResponse:
+def create_from_youtube(
+    req: StudyPackFromYoutubeRequest,
+    db: Session = Depends(get_db),
+) -> StudyPackFromYoutubeResponse:
     url = (req.url or "").strip()
     if not url:
         raise HTTPException(status_code=400, detail="URL is required")
@@ -130,7 +136,11 @@ def create_from_youtube(req: StudyPackFromYoutubeRequest, db: Session = Depends(
             language=req.language,
         )
 
-        job = create_job(db, "ingest_youtube_captions", {"study_pack_id": sp.id, "video_id": video_id})
+        job = create_job(
+            db,
+            "ingest_youtube_captions",
+            {"study_pack_id": sp.id, "video_id": video_id},
+        )
         async_result = ingest_youtube_captions.delay(job.id, sp.id, video_id, req.language)
 
         return StudyPackFromYoutubeResponse(
@@ -331,7 +341,13 @@ def kb_embed(
     )
 
     async_result = embed_transcript_chunks.delay(job.id, study_pack_id, model)
-    return KBEmbedResponse(ok=True, study_pack_id=study_pack_id, job_id=job.id, task_id=async_result.id, model=model)
+    return KBEmbedResponse(
+        ok=True,
+        study_pack_id=study_pack_id,
+        job_id=job.id,
+        task_id=async_result.id,
+        model=model,
+    )
 
 
 @router.get("/{study_pack_id}/kb/status")
@@ -363,3 +379,67 @@ def kb_status(
         "embedded": embedded,
         "model": model,
     }
+
+
+# -----------------------
+# V2.2 — KB (Retrieval)
+# -----------------------
+
+class KBSearchItem(BaseModel):
+    chunk_id: int
+    idx: int
+    start_sec: float
+    end_sec: float
+    text: str
+    score: float
+    distance: float
+
+
+class KBSearchResponse(BaseModel):
+    ok: bool
+    study_pack_id: int
+    model: str
+    q: str
+    limit: int
+    hybrid: bool
+    items: list[KBSearchItem]
+
+
+@router.get("/{study_pack_id}/kb/search", response_model=KBSearchResponse)
+def kb_search(
+    study_pack_id: int,
+    db: Session = Depends(get_db),
+    q: str = Query(..., min_length=1),
+    model: str = Query(default="sentence-transformers/all-MiniLM-L6-v2"),
+    limit: int = Query(default=8, ge=1, le=25),
+    hybrid: bool = Query(default=True),
+):
+    sp = db.query(StudyPack).filter(StudyPack.id == study_pack_id).first()
+    if not sp:
+        raise HTTPException(status_code=404, detail="Study pack not found")
+
+    try:
+        items = kb_search_chunks(
+            db=db,
+            study_pack_id=study_pack_id,
+            query=q,
+            model=model,
+            limit=limit,
+            use_hybrid=hybrid,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"KB search failed: {e}")
+
+    return KBSearchResponse(
+        ok=True,
+        study_pack_id=study_pack_id,
+        model=model,
+        q=q,
+        limit=limit,
+        hybrid=hybrid,
+        items=[KBSearchItem(**x) for x in items],
+    )
