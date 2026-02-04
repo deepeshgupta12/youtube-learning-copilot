@@ -36,6 +36,77 @@ _NOISE_FULL_RE = re.compile(rf"^\s*\[{_NOISE_WORDS}\]\s*$", re.IGNORECASE)
 # strips leading noise prefix: "[Music] hello" -> "hello"
 _NOISE_PREFIX_RE = re.compile(rf"^\s*(?:\[{_NOISE_WORDS}\]\s*)+", re.IGNORECASE)
 
+_word_re = re.compile(r"[A-Za-z0-9']+")
+
+
+def _words(s: str) -> list[str]:
+    return [w.lower() for w in _word_re.findall(s or "")]
+
+
+def _collapse_consecutive_phrase_repeats(
+    text: str,
+    *,
+    min_words: int = 3,
+    max_words: int = 10,
+    max_passes: int = 6,
+) -> str:
+    """
+    Collapse consecutive repeated phrases inside the same segment.
+
+    Example:
+      "structure is what it's made up of structure is what it's made up of"
+      -> "structure is what it's made up of"
+
+    Works on word tokens to be punctuation/case tolerant.
+    """
+    original = text
+    t = " ".join((text or "").split()).strip()
+    if not t:
+        return t
+
+    toks = t.split()
+    if len(toks) < min_words * 2:
+        return t
+
+    for _ in range(max_passes):
+        changed = False
+        n = len(toks)
+
+        i = 0
+        out: list[str] = []
+        while i < n:
+            best_k = 0
+
+            # Try longer phrase sizes first for stronger collapse
+            for k in range(min(max_words, (n - i) // 2), min_words - 1, -1):
+                a = toks[i : i + k]
+                b = toks[i + k : i + 2 * k]
+                if _words(" ".join(a)) == _words(" ".join(b)):
+                    best_k = k
+                    break
+
+            if best_k > 0:
+                phrase = toks[i : i + best_k]
+                out.extend(phrase)
+                i += best_k
+
+                # Skip additional consecutive repeats of the same phrase
+                while i + best_k <= n and _words(" ".join(toks[i : i + best_k])) == _words(" ".join(phrase)):
+                    i += best_k
+
+                changed = True
+                continue
+
+            out.append(toks[i])
+            i += 1
+
+        toks = out
+        if not changed:
+            break
+
+    collapsed = " ".join(toks).strip()
+    return collapsed if collapsed else original
+
 
 def _proxy_dict(proxy_url: str | None) -> dict | None:
     if not proxy_url:
@@ -99,8 +170,10 @@ def clean_segments(
     - normalize spaces
     - strip leading bracketed noise prefix like "[Music] ..."
     - drop pure noise tokens like "[Music]"
-    - collapse consecutive duplicates
+    - collapse consecutive repeated phrases inside a segment (rolling captions echo)
+    - collapse consecutive duplicates (rolling dedupe)
     - merge tiny segments into previous segment
+
     Returns segments in schema: {text, start, duration}
     """
     cleaned: list[dict[str, Any]] = []
@@ -120,6 +193,12 @@ def clean_segments(
 
         # drop pure bracket noise (handles "[Music]")
         if _is_noise_text(txt):
+            continue
+
+        # NEW: collapse repeated phrases inside the same segment
+        txt = _collapse_consecutive_phrase_repeats(txt, min_words=3, max_words=10, max_passes=6)
+        txt = _normalize_space(txt)
+        if not txt:
             continue
 
         start = float(seg.get("start") or 0.0)
