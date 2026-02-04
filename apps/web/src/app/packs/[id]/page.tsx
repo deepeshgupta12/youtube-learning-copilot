@@ -291,6 +291,9 @@ export default function PackPage() {
             className="rounded-xl border border-white/15 bg-white/5 px-4 py-2 text-xs text-white/85 hover:bg-white/8"
           >
             Study transcript
+          </Link>
+
+          <Link
             href={`/packs/${studyPackId}/study/chapters`}
             className={[
               "rounded-xl border border-white/15 bg-white/5 px-4 py-2 text-xs",

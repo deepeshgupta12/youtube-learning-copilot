@@ -14,6 +14,9 @@ from app.services.study_packs import set_failed, set_ingested
 import app.services.transcript as transcript
 from app.worker.celery_app import celery_app
 
+# Ensure Celery registers KB tasks
+import app.worker.embedding_tasks  # noqa: F401
+
 
 # -----------------------------
 # Smart chunking (V1.4.2)

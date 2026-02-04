@@ -1,9 +1,11 @@
+# apps/api/app/api/study_packs.py
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 
 from app.models.transcript_chunk import TranscriptChunk
+from app.models.transcript_chunk_embedding import TranscriptChunkEmbedding
 from app.db.session import get_db
 from app.models.study_pack import StudyPack
 from app.services.jobs import create_job
@@ -15,6 +17,7 @@ from app.services.youtube import (
     build_video_url,
 )
 from app.worker.ingest_tasks import ingest_youtube_captions, ingest_youtube_playlist
+from app.worker.embedding_tasks import embed_transcript_chunks  # Celery task
 
 router = APIRouter(prefix="/study-packs", tags=["study_packs"])
 
@@ -223,6 +226,7 @@ def get_study_pack(study_pack_id: int, db: Session = Depends(get_db)):
         },
     }
 
+
 @router.get("/{study_pack_id}/transcript")
 def get_transcript(study_pack_id: int, db: Session = Depends(get_db)):
     sp = db.query(StudyPack).filter(StudyPack.id == study_pack_id).first()
@@ -289,4 +293,73 @@ def list_transcript_chunks(
         "limit": limit,
         "offset": offset,
         "items": items,
+    }
+
+
+# -----------------------
+# V2.1 — KB (Embeddings)
+# -----------------------
+
+class KBEmbedRequest(BaseModel):
+    model: str | None = None
+
+
+class KBEmbedResponse(BaseModel):
+    ok: bool
+    study_pack_id: int
+    job_id: int
+    task_id: str
+    model: str | None = None
+
+
+@router.post("/{study_pack_id}/kb/embed", response_model=KBEmbedResponse)
+def kb_embed(
+    study_pack_id: int,
+    req: KBEmbedRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    sp = db.query(StudyPack).filter(StudyPack.id == study_pack_id).first()
+    if not sp:
+        raise HTTPException(status_code=404, detail="Study pack not found")
+
+    model = (req.model if req else None)
+
+    job = create_job(
+        db,
+        "kb_embed_transcript_chunks",
+        {"study_pack_id": study_pack_id, "model": model},
+    )
+
+    async_result = embed_transcript_chunks.delay(job.id, study_pack_id, model)
+    return KBEmbedResponse(ok=True, study_pack_id=study_pack_id, job_id=job.id, task_id=async_result.id, model=model)
+
+
+@router.get("/{study_pack_id}/kb/status")
+def kb_status(
+    study_pack_id: int,
+    db: Session = Depends(get_db),
+    model: str | None = Query(default=None),
+):
+    sp = db.query(StudyPack).filter(StudyPack.id == study_pack_id).first()
+    if not sp:
+        raise HTTPException(status_code=404, detail="Study pack not found")
+
+    # default model name is stored in env/worker; if not provided, count all models
+    q_chunks = db.query(func.count(TranscriptChunk.id)).filter(TranscriptChunk.study_pack_id == study_pack_id)
+    total_chunks = int(q_chunks.scalar() or 0)
+
+    q_emb = db.query(func.count(TranscriptChunkEmbedding.id)).filter(
+        TranscriptChunkEmbedding.study_pack_id == study_pack_id
+    )
+    if model:
+        q_emb = q_emb.filter(TranscriptChunkEmbedding.model == model)
+
+    embedded = int(q_emb.scalar() or 0)
+
+    return {
+        "ok": True,
+        "study_pack_id": study_pack_id,
+        "total_chunks": total_chunks,
+        "embedded": embedded,
+        "model": model,
     }
