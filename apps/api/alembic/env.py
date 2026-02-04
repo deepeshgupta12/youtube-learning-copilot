@@ -12,9 +12,8 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path = [p for p in sys.path if os.path.abspath(p) != BASE_DIR]
 sys.path.insert(0, BASE_DIR)
 
-# Now imports will resolve to apps/api/app/*
-from app.db.base import Base  # noqa: E402
-from app.models import User, StudyPack, Job  # noqa: F401,E402
+# ✅ Import Base.metadata which registers all models via app.db.base imports
+from app.db.base import Base  # noqa: E402,F401
 
 config = context.config
 
