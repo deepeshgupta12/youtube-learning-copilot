@@ -42,7 +42,6 @@ export type StudyPackResponse = {
     created_at: string | null;
     updated_at: string | null;
 
-    // ✅ include playlist fields (backend already returns these)
     playlist_id?: string | null;
     playlist_title?: string | null;
     playlist_index?: number | null;
@@ -158,7 +157,7 @@ export type TranscriptGetResponse = {
 
 export type TranscriptChunkItem = {
   id: number;
-  idx: number; // IMPORTANT: matches backend/model
+  idx: number;
   start_sec: number;
   end_sec: number;
   text: string;
@@ -175,7 +174,7 @@ export type TranscriptChunksResponse = {
   items: TranscriptChunkItem[];
 };
 
-/** ✅ V1 Minimal Library types */
+/** V1 Minimal Library types */
 export type StudyPackListItem = {
   id: number;
   title: string | null;
@@ -207,20 +206,12 @@ function baseUrl(): string {
   return v && v.trim() ? v.trim().replace(/\/+$/, "") : "http://localhost:8000";
 }
 
-type Json = Record<string, unknown> | unknown[] | string | number | boolean | null;
-
-function isJsonBody(body: any): boolean {
-  return typeof body === "string" || typeof body === "object";
-}
-
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const url = `${baseUrl()}${path.startsWith("/") ? path : `/${path}`}`;
 
   const method = (init?.method || "GET").toUpperCase();
   const hasBody = init?.body !== undefined && init?.body !== null;
 
-  // Only send Content-Type when we have a JSON body.
-  // This avoids unnecessary CORS preflight for GET and body-less POST.
   const headers: Record<string, string> = {
     ...(init?.headers as Record<string, string> | undefined),
   };
@@ -246,9 +237,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!res.ok) {
-    const msg =
-      (data && (data.detail || data.error)) ||
-      `HTTP ${res.status} calling ${url}`;
+    const msg = (data && (data.detail || data.error)) || `HTTP ${res.status} calling ${url}`;
     throw new Error(msg);
   }
 
@@ -280,11 +269,10 @@ export async function generateMaterials(studyPackId: number): Promise<GenerateMa
 }
 
 export async function getMaterials(studyPackId: number): Promise<StudyMaterialsResponse> {
-  return apiFetch<StudyMaterialsResponse>(`/study-packs/${studyPackId}/materials`, {
-    method: "GET" });
+  return apiFetch<StudyMaterialsResponse>(`/study-packs/${studyPackId}/materials`, { method: "GET" });
 }
 
-/** ✅ V1 Minimal Library call */
+/** V1 Minimal Library call */
 export async function listStudyPacks(params?: {
   q?: string;
   status?: string;
@@ -330,41 +318,55 @@ export async function pollJobUntilDone(
 }
 
 export async function getFlashcardProgress(studyPackId: number): Promise<FlashcardProgressResponse> {
-  return apiFetch<FlashcardProgressResponse>(
-    `/study-packs/${studyPackId}/flashcards/progress`,
-    { method: "GET" }
-  );
+  return apiFetch<FlashcardProgressResponse>(`/study-packs/${studyPackId}/flashcards/progress`, {
+    method: "GET",
+  });
 }
 
 export async function markFlashcardProgress(
   studyPackId: number,
   req: FlashcardMarkRequest
 ): Promise<FlashcardProgressResponse> {
-  return apiFetch<FlashcardProgressResponse>(
-    `/study-packs/${studyPackId}/flashcards/progress`,
-    { method: "POST", body: JSON.stringify(req) }
-  );
+  return apiFetch<FlashcardProgressResponse>(`/study-packs/${studyPackId}/flashcards/progress`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
 }
 
 export async function getQuizProgress(studyPackId: number): Promise<QuizProgressResponse> {
-  return apiFetch<QuizProgressResponse>(
-    `/study-packs/${studyPackId}/quiz/progress`,
-    { method: "GET" }
-  );
+  return apiFetch<QuizProgressResponse>(`/study-packs/${studyPackId}/quiz/progress`, {
+    method: "GET",
+  });
 }
 
 export async function markQuizProgress(
   studyPackId: number,
   req: QuizMarkRequest
 ): Promise<QuizProgressResponse> {
-  return apiFetch<QuizProgressResponse>(
-    `/study-packs/${studyPackId}/quiz/progress`,
-    { method: "POST", body: JSON.stringify(req) }
-  );
+  return apiFetch<QuizProgressResponse>(`/study-packs/${studyPackId}/quiz/progress`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+export async function getChapterProgress(studyPackId: number): Promise<ChapterProgressResponse> {
+  return apiFetch<ChapterProgressResponse>(`/study-packs/${studyPackId}/chapters/progress`, {
+    method: "GET",
+  });
+}
+
+export async function markChapterProgress(
+  studyPackId: number,
+  req: ChapterMarkRequest
+): Promise<ChapterProgressResponse> {
+  return apiFetch<ChapterProgressResponse>(`/study-packs/${studyPackId}/chapters/progress`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
 }
 
 export async function getTranscript(studyPackId: number): Promise<TranscriptGetResponse> {
-  return apiFetch(`/study-packs/${studyPackId}/transcript`);
+  return apiFetch<TranscriptGetResponse>(`/study-packs/${studyPackId}/transcript`, { method: "GET" });
 }
 
 export async function listTranscriptChunks(args: {
@@ -377,21 +379,8 @@ export async function listTranscriptChunks(args: {
   if (args.q) qs.set("q", args.q);
   qs.set("limit", String(args.limit ?? 50));
   qs.set("offset", String(args.offset ?? 0));
-  return apiFetch(`/study-packs/${args.studyPackId}/transcript/chunks?${qs.toString()}`);
-=======
-export async function getChapterProgress(studyPackId: number): Promise<ChapterProgressResponse> {
-  return apiFetch<ChapterProgressResponse>(
-    `/study-packs/${studyPackId}/chapters/progress`,
+  return apiFetch<TranscriptChunksResponse>(
+    `/study-packs/${args.studyPackId}/transcript/chunks?${qs.toString()}`,
     { method: "GET" }
-  );
-}
-
-export async function markChapterProgress(
-  studyPackId: number,
-  req: ChapterMarkRequest
-): Promise<ChapterProgressResponse> {
-  return apiFetch<ChapterProgressResponse>(
-    `/study-packs/${studyPackId}/chapters/progress`,
-    { method: "POST", body: JSON.stringify(req) }
   );
 }
