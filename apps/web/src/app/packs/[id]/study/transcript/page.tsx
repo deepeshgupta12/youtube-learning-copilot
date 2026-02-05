@@ -6,7 +6,9 @@ import { useEffect, useMemo, useState } from "react";
 import {
   getStudyPack,
   getTranscript,
+  kbAsk,
   listTranscriptChunks,
+  type KBAskResponse,
   type StudyPackResponse,
   type TranscriptChunkItem,
   type TranscriptGetResponse,
@@ -64,6 +66,7 @@ export default function TranscriptStudyPage() {
   const [pack, setPack] = useState<StudyPackResponse["study_pack"] | null>(null);
   const [t, setT] = useState<TranscriptGetResponse | null>(null);
 
+  // Transcript search
   const [q, setQ] = useState("");
   const [items, setItems] = useState<TranscriptChunkItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -74,6 +77,16 @@ export default function TranscriptStudyPage() {
 
   const limit = 60;
   const [offset, setOffset] = useState(0);
+
+  // KB Ask (V2.4)
+  const [askQ, setAskQ] = useState("");
+  const [askLoading, setAskLoading] = useState(false);
+  const [askErr, setAskErr] = useState<string | null>(null);
+  const [askResp, setAskResp] = useState<KBAskResponse | null>(null);
+
+  const [askLimit, setAskLimit] = useState(6);
+  const [askHybrid, setAskHybrid] = useState(true);
+  const [embedModel, setEmbedModel] = useState("sentence-transformers/all-MiniLM-L6-v2");
 
   const durationSec = useMemo(() => {
     if (!items?.length) return 0;
@@ -119,6 +132,31 @@ export default function TranscriptStudyPage() {
     }
   }
 
+  async function onAsk() {
+    if (!studyPackId) return;
+    const question = askQ.trim();
+    if (!question) {
+      setAskErr("Please enter a question.");
+      return;
+    }
+
+    setAskErr(null);
+    setAskLoading(true);
+    try {
+      const resp = await kbAsk(studyPackId, {
+        question,
+        limit: askLimit,
+        hybrid: askHybrid,
+        embed_model: embedModel || null,
+      });
+      setAskResp(resp);
+    } catch (e: any) {
+      setAskErr(e?.message || String(e));
+    } finally {
+      setAskLoading(false);
+    }
+  }
+
   useEffect(() => {
     loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -161,9 +199,7 @@ export default function TranscriptStudyPage() {
 
       <div className="mt-6">
         <h1 className="text-3xl font-semibold text-white">Transcript</h1>
-        <p className="mt-2 text-sm text-white/60">
-          Searchable, timestamped transcript chunks.
-        </p>
+        <p className="mt-2 text-sm text-white/60">Searchable, timestamped transcript chunks + grounded Q&A.</p>
       </div>
 
       {err && (
@@ -173,6 +209,172 @@ export default function TranscriptStudyPage() {
       )}
 
       <div className="mt-6 grid gap-4">
+        {/* V2.4 — Ask from transcript */}
+        <GlassCard
+          title="Ask from transcript"
+          right={
+            pack?.source_url ? (
+              <a
+                href={pack.source_url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs text-white/70 underline underline-offset-4 hover:text-white"
+              >
+                Open source
+              </a>
+            ) : null
+          }
+        >
+          <div className="grid gap-3">
+            <div className="text-sm text-white/70">
+              Ask a question. The answer will only use retrieved transcript excerpts and include timestamped citations.
+            </div>
+
+            <textarea
+              value={askQ}
+              onChange={(e) => setAskQ(e.target.value)}
+              placeholder="Example: What is the difference between brain structure and function?"
+              className="min-h-[92px] w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/90 outline-none focus:border-white/20"
+            />
+
+            <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+              <div className="flex flex-wrap gap-3">
+                <div>
+                  <div className="text-xs text-white/50">Limit</div>
+                  <input
+                    value={String(askLimit)}
+                    onChange={(e) => setAskLimit(Math.max(1, Math.min(12, Number(e.target.value || 6))))}
+                    className="mt-2 w-[110px] rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/90 outline-none focus:border-white/20"
+                    inputMode="numeric"
+                  />
+                  <div className="mt-1 text-[11px] text-white/45">1–12</div>
+                </div>
+
+                <div>
+                  <div className="text-xs text-white/50">Hybrid retrieval</div>
+                  <button
+                    onClick={() => setAskHybrid((v) => !v)}
+                    className="mt-2 rounded-xl border border-white/15 bg-white/5 px-4 py-2 text-xs text-white/85 hover:bg-white/8"
+                  >
+                    {askHybrid ? "On" : "Off"}
+                  </button>
+                </div>
+
+                <div className="min-w-[280px]">
+                  <div className="text-xs text-white/50">Embed model</div>
+                  <input
+                    value={embedModel}
+                    onChange={(e) => setEmbedModel(e.target.value)}
+                    className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-white/90 outline-none focus:border-white/20"
+                  />
+                  <div className="mt-1 text-[11px] text-white/45">Sent as embed_model</div>
+                </div>
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={onAsk}
+                  disabled={askLoading}
+                  className="rounded-xl border border-white/15 bg-white/10 px-4 py-2 text-xs text-white hover:bg-white/15 disabled:opacity-50"
+                >
+                  {askLoading ? "Asking…" : "Ask"}
+                </button>
+
+                <button
+                  onClick={() => {
+                    setAskQ("");
+                    setAskResp(null);
+                    setAskErr(null);
+                  }}
+                  disabled={askLoading}
+                  className="rounded-xl border border-white/15 bg-white/5 px-4 py-2 text-xs text-white/85 hover:bg-white/8 disabled:opacity-50"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+
+            {askErr && (
+              <div className="rounded-xl border border-red-400/30 bg-red-400/10 px-4 py-3 text-sm text-red-100 whitespace-pre-wrap">
+                {askErr}
+              </div>
+            )}
+
+            {askResp && (
+              <div className="grid gap-3">
+                {askResp.refused ? (
+                  <div className="rounded-xl border border-yellow-400/25 bg-yellow-400/10 px-4 py-3 text-sm text-yellow-50 whitespace-pre-wrap">
+                    {askResp.answer}
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+                    <div className="text-xs text-white/50">Answer</div>
+                    <div className="mt-2 whitespace-pre-wrap leading-7 text-white/90">{askResp.answer}</div>
+                  </div>
+                )}
+
+                <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-xs text-white/50">Citations</div>
+                    <div className="text-[11px] text-white/45">
+                      model: {askResp.model}
+                      {askResp.embed_model ? ` · embed: ${askResp.embed_model}` : ""}
+                    </div>
+                  </div>
+
+                  {askResp.citations?.length ? (
+                    <div className="mt-3 grid gap-2">
+                      {askResp.citations.map((c, i) => (
+                        <div key={`${c.chunk_id}-${i}`} className="rounded-xl border border-white/10 bg-white/5 p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="text-xs text-white/60">
+                              [{i + 1}] chunk #{c.idx} · {fmtTime(c.start_sec)} → {fmtTime(c.end_sec)} · score{" "}
+                              {c.score?.toFixed ? c.score.toFixed(3) : c.score}
+                            </div>
+
+                            <div className="flex gap-2">
+                              {c.url ? (
+                                <a
+                                  href={c.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-white/80 hover:bg-white/10"
+                                >
+                                  Watch
+                                </a>
+                              ) : null}
+
+                              <button
+                                onClick={() => copyToClipboard(c.text)}
+                                className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-white/75 hover:bg-white/10"
+                              >
+                                Copy
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="mt-2 whitespace-pre-wrap leading-7 text-white/85">{c.text}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="mt-2 text-sm text-white/60">No citations returned.</div>
+                  )}
+
+                  <details className="mt-3">
+                    <summary className="cursor-pointer text-xs text-white/60 hover:text-white/80">
+                      View retrieval debug
+                    </summary>
+                    <pre className="mt-2 whitespace-pre-wrap text-[11px] text-white/65">
+                      {JSON.stringify(askResp.retrieval, null, 2)}
+                    </pre>
+                  </details>
+                </div>
+              </div>
+            )}
+          </div>
+        </GlassCard>
+
         <GlassCard title="Pack info" right={pack ? <span>#{pack.id}</span> : null}>
           {loading && <div className="text-sm text-white/60">Loading…</div>}
           {pack && (
@@ -237,9 +439,7 @@ export default function TranscriptStudyPage() {
             {loadingChunks ? (
               <div className="text-sm text-white/60">Loading chunks…</div>
             ) : items.length === 0 ? (
-              <div className="text-sm text-white/60">
-                No chunks found{q.trim() ? " for this search." : "."}
-              </div>
+              <div className="text-sm text-white/60">No chunks found{q.trim() ? " for this search." : "."}</div>
             ) : (
               <div className="grid gap-3">
                 {items.map((c) => (
@@ -256,9 +456,7 @@ export default function TranscriptStudyPage() {
                       </button>
                     </div>
 
-                    <div className="mt-2 whitespace-pre-wrap leading-7 text-white/85">
-                      {c.text}
-                    </div>
+                    <div className="mt-2 whitespace-pre-wrap leading-7 text-white/85">{c.text}</div>
                   </div>
                 ))}
               </div>

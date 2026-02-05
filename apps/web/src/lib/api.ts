@@ -201,6 +201,54 @@ export type StudyPackListResponse = {
   packs: StudyPackListItem[];
 };
 
+/** -----------------------
+ * V2.4 — KB Ask (Grounded Q&A)
+ * ---------------------- */
+export type KBAskCitation = {
+  chunk_id: number;
+  idx: number;
+  start_sec: number;
+  end_sec: number;
+  text: string;
+  score: number;
+  url?: string; // timestamped citation URL (YouTube)
+};
+
+export type KBAskStudyPackInfo = {
+  id: number;
+  title: string | null;
+  source_url: string;
+  source_type: string;
+  playlist_id: string | null;
+  playlist_index: number | null;
+};
+
+export type KBAskRequest = {
+  question: string;
+  model?: string | null;
+  limit?: number | null;
+  hybrid?: boolean | null;
+  min_best_score?: number | null;
+
+  // V2.4: controls retrieval embedding model
+  embed_model?: string | null;
+};
+
+export type KBAskResponse = {
+  ok: boolean;
+  study_pack_id: number;
+  refused: boolean;
+  answer: string;
+  model: string;
+
+  // V2.4 additions
+  embed_model?: string | null;
+  study_pack?: KBAskStudyPackInfo;
+
+  citations: KBAskCitation[];
+  retrieval: any;
+};
+
 function baseUrl(): string {
   const v = process.env.NEXT_PUBLIC_API_BASE_URL;
   return v && v.trim() ? v.trim().replace(/\/+$/, "") : "http://localhost:8000";
@@ -383,4 +431,12 @@ export async function listTranscriptChunks(args: {
     `/study-packs/${args.studyPackId}/transcript/chunks?${qs.toString()}`,
     { method: "GET" }
   );
+}
+
+/** V2.4 — KB Ask */
+export async function kbAsk(studyPackId: number, req: KBAskRequest): Promise<KBAskResponse> {
+  return apiFetch<KBAskResponse>(`/study-packs/${studyPackId}/kb/ask`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
 }
