@@ -111,6 +111,7 @@ def ask_grounded(
     limit: int = 6,
     hybrid: bool = True,
     min_score: float = 0.35,
+    min_best_score: Optional[float] = None,  # <-- NEW alias
 ) -> Dict[str, Any]:
     """
     Grounded Q&A:
@@ -132,9 +133,10 @@ def ask_grounded(
             "used_chunks": [],
         }
     # Backward-compat: allow callers to pass model=...
-# Backward-compat: allow callers to pass model=...
     if model:
         embed_model = model
+    if min_best_score is not None:
+        min_score = float(min_best_score)
 
     items = _kb_search_chunks_compat(
         db,
