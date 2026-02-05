@@ -4,12 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import text, bindparam
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
-from pgvector.sqlalchemy import Vector
 
 from app.models.transcript_chunk import TranscriptChunk
-from app.models.transcript_chunk_embedding import TranscriptChunkEmbedding
 from app.services.embeddings import embed_texts
 
 
@@ -29,6 +27,14 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
         return float(x)
     except Exception:
         return default
+
+
+def _to_pgvector_literal(vec: List[float]) -> str:
+    """
+    Convert list[float] -> pgvector literal string: "[0.1,0.2,...]".
+    This avoids psycopg sending it as double precision[] (array), which breaks <=>.
+    """
+    return "[" + ",".join(f"{float(v):.8f}" for v in vec) + "]"
 
 
 def kb_search_chunks(
@@ -55,13 +61,13 @@ def kb_search_chunks(
         return []
 
     # 1) Semantic search (pgvector)
-    # Embed the query locally
     q_vec = embed_texts([text_q], model_name=model, normalize=True)[0]
     dim = len(q_vec)
+    qvec_literal = _to_pgvector_literal([float(x) for x in q_vec])
 
-    # NOTE: We use raw SQL to avoid tight coupling on SQLAlchemy vector operators.
-    # distance = embedding <=> query_vec (cosine distance in pgvector)
-    # lower distance is better.
+    # Important:
+    # - bind :qvec as TEXT and cast to ::vector in SQL
+    # - otherwise psycopg sends python list as double precision[] and pgvector <=> fails
     stmt = text(
         """
         SELECT
@@ -70,43 +76,50 @@ def kb_search_chunks(
           tc.start_sec AS start_sec,
           tc.end_sec AS end_sec,
           tc.text AS text,
-          (1.0 - (tce.embedding <=> :qvec)) AS score,
-          (tce.embedding <=> :qvec) AS distance
+          (1.0 - (tce.embedding <=> (:qvec)::vector)) AS score,
+          (tce.embedding <=> (:qvec)::vector) AS distance
         FROM transcript_chunk_embeddings tce
         JOIN transcript_chunks tc ON tc.id = tce.chunk_id
         WHERE tce.study_pack_id = :study_pack_id
           AND tce.model = :model
           AND tce.dim = :dim
-        ORDER BY tce.embedding <=> :qvec
+        ORDER BY tce.embedding <=> (:qvec)::vector
         LIMIT :k
         """
     ).bindparams(
-        bindparam("qvec", type_=Vector(dim))
+        bindparam("qvec"),
+        bindparam("study_pack_id"),
+        bindparam("model"),
+        bindparam("dim"),
+        bindparam("k"),
     )
 
-    sem_rows = db.execute(
-        stmt,
-        {
-            "qvec": q_vec,
-            "study_pack_id": study_pack_id,
-            "model": model,
-            "dim": dim,
-            "k": limit,
-        },
-    ).mappings().all()
+    sem_rows = (
+        db.execute(
+            stmt,
+            {
+                "qvec": qvec_literal,
+                "study_pack_id": study_pack_id,
+                "model": model,
+                "dim": dim,
+                "k": int(limit),
+            },
+        )
+        .mappings()
+        .all()
+    )
 
-    # Convert semantic rows to dicts
     sem_items: List[Dict[str, Any]] = []
     for r in sem_rows:
         sem_items.append(
             {
-                "chunk_id": int(r.chunk_id),
-                "idx": int(r.idx),
-                "start_sec": _safe_float(r.start_sec),
-                "end_sec": _safe_float(r.end_sec),
-                "text": str(r.text),
-                "score": _safe_float(r.score),
-                "distance": _safe_float(r.distance),
+                "chunk_id": int(r["chunk_id"]),
+                "idx": int(r["idx"]),
+                "start_sec": _safe_float(r["start_sec"]),
+                "end_sec": _safe_float(r["end_sec"]),
+                "text": str(r["text"]),
+                "score": _safe_float(r["score"]),
+                "distance": _safe_float(r["distance"]),
             }
         )
 
@@ -114,26 +127,26 @@ def kb_search_chunks(
         return sem_items[:limit]
 
     # 2) Lexical boost (simple ILIKE, small candidate pool)
-    # Use a tiny bag-of-words match over transcript_chunks text.
-    # Then blend by bumping score if chunk appears lexically relevant.
-    tokens = [t for t in text_q.lower().replace(":", " ").replace(",", " ").split() if len(t) >= 3]
-    tokens = tokens[:8]  # cap to keep query sane
+    tokens = [
+        t
+        for t in text_q.lower().replace(":", " ").replace(",", " ").split()
+        if len(t) >= 3
+    ][:8]
     if not tokens:
         return sem_items[:limit]
 
-    lex_query = db.query(TranscriptChunk).filter(TranscriptChunk.study_pack_id == study_pack_id)
+    lex_query = db.query(TranscriptChunk).filter(
+        TranscriptChunk.study_pack_id == study_pack_id
+    )
     for t in tokens:
         lex_query = lex_query.filter(TranscriptChunk.text.ilike(f"%{t}%"))
 
     lex_rows = lex_query.order_by(TranscriptChunk.idx.asc()).limit(limit * 3).all()
     lex_ids = {int(x.id) for x in lex_rows}
 
-    # Blend:
-    # - start with semantic
-    # - boost if chunk appears in lexical set
     for it in sem_items:
         if int(it["chunk_id"]) in lex_ids:
-            it["score"] = float(it["score"]) + 0.08  # small boost
+            it["score"] = float(it["score"]) + 0.08
 
     sem_items.sort(key=lambda d: float(d["score"]), reverse=True)
     return sem_items[:limit]

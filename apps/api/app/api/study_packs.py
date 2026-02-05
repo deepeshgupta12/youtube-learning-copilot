@@ -18,10 +18,12 @@ from app.services.youtube import (
 )
 from app.worker.ingest_tasks import ingest_youtube_captions, ingest_youtube_playlist
 from app.worker.embedding_tasks import embed_transcript_chunks  # Celery task
-from app.services.kb_qa import ask_grounded
 
-# ✅ V2.2 Retrieval service
+# V2.2 Retrieval service
 from app.services.kb_search import kb_search_chunks
+
+# V2.3 Q&A service
+from app.services.kb_qa import ask_grounded
 
 router = APIRouter(prefix="/study-packs", tags=["study_packs"])
 
@@ -53,13 +55,6 @@ def list_study_packs(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
-    """
-    V1 Minimal Library:
-    - Recent study packs
-    - Search by title/url/id/playlist fields
-    - Optional filters (status, source_type)
-    - Pagination via limit/offset
-    """
     query = db.query(StudyPack)
 
     if status:
@@ -81,7 +76,6 @@ def list_study_packs(
         )
 
     total = query.count()
-
     rows = (
         query.order_by(StudyPack.created_at.desc())
         .offset(offset)
@@ -109,13 +103,7 @@ def list_study_packs(
             }
         )
 
-    return {
-        "ok": True,
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-        "packs": packs,
-    }
+    return {"ok": True, "total": total, "limit": limit, "offset": offset, "packs": packs}
 
 
 @router.post("/from-youtube", response_model=StudyPackFromYoutubeResponse)
@@ -152,7 +140,6 @@ def create_from_youtube(
             video_id=video_id,
         )
 
-    # If not a single video, try playlist
     playlist_id = extract_youtube_playlist_id(url)
     if not playlist_id:
         raise HTTPException(status_code=400, detail="Invalid YouTube URL (not a video or playlist)")
@@ -175,7 +162,6 @@ def create_from_youtube(
             language=req.language,
         )
 
-        # set playlist fields + title at creation time
         sp.playlist_id = playlist_id
         sp.playlist_title = playlist_title
         sp.playlist_index = idx
@@ -196,7 +182,6 @@ def create_from_youtube(
     )
     async_result = ingest_youtube_playlist.delay(job.id, playlist_id, created_ids, req.language)
 
-    # Return the first pack id so current UI can auto-open /packs/:id
     return StudyPackFromYoutubeResponse(
         ok=True,
         study_pack_id=created_ids[0],
@@ -275,7 +260,6 @@ def list_transcript_chunks(
         query = query.filter(TranscriptChunk.text.ilike(s))
 
     total = query.count()
-
     rows = (
         query.order_by(TranscriptChunk.idx.asc())
         .offset(offset)
@@ -297,14 +281,7 @@ def list_transcript_chunks(
             }
         )
 
-    return {
-        "ok": True,
-        "study_pack_id": study_pack_id,
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-        "items": items,
-    }
+    return {"ok": True, "study_pack_id": study_pack_id, "total": total, "limit": limit, "offset": offset, "items": items}
 
 
 # -----------------------
@@ -335,20 +312,10 @@ def kb_embed(
 
     model = (req.model if req else None)
 
-    job = create_job(
-        db,
-        "kb_embed_transcript_chunks",
-        {"study_pack_id": study_pack_id, "model": model},
-    )
-
+    job = create_job(db, "kb_embed_transcript_chunks", {"study_pack_id": study_pack_id, "model": model})
     async_result = embed_transcript_chunks.delay(job.id, study_pack_id, model)
-    return KBEmbedResponse(
-        ok=True,
-        study_pack_id=study_pack_id,
-        job_id=job.id,
-        task_id=async_result.id,
-        model=model,
-    )
+
+    return KBEmbedResponse(ok=True, study_pack_id=study_pack_id, job_id=job.id, task_id=async_result.id, model=model)
 
 
 @router.get("/{study_pack_id}/kb/status")
@@ -361,7 +328,6 @@ def kb_status(
     if not sp:
         raise HTTPException(status_code=404, detail="Study pack not found")
 
-    # default model name is stored in env/worker; if not provided, count all models
     q_chunks = db.query(func.count(TranscriptChunk.id)).filter(TranscriptChunk.study_pack_id == study_pack_id)
     total_chunks = int(q_chunks.scalar() or 0)
 
@@ -373,20 +339,14 @@ def kb_status(
 
     embedded = int(q_emb.scalar() or 0)
 
-    return {
-        "ok": True,
-        "study_pack_id": study_pack_id,
-        "total_chunks": total_chunks,
-        "embedded": embedded,
-        "model": model,
-    }
+    return {"ok": True, "study_pack_id": study_pack_id, "total_chunks": total_chunks, "embedded": embedded, "model": model}
 
 
 # -----------------------
 # V2.2 — KB (Retrieval)
 # -----------------------
 
-class KBSearchItem(BaseModel):
+class KBSearchItemModel(BaseModel):
     chunk_id: int
     idx: int
     start_sec: float
@@ -403,7 +363,7 @@ class KBSearchResponse(BaseModel):
     q: str
     limit: int
     hybrid: bool
-    items: list[KBSearchItem]
+    items: list[KBSearchItemModel]
 
 
 @router.get("/{study_pack_id}/kb/search", response_model=KBSearchResponse)
@@ -423,15 +383,11 @@ def kb_search(
         items = kb_search_chunks(
             db=db,
             study_pack_id=study_pack_id,
-            query=q,
+            q=q,                 # canonical
             model=model,
             limit=limit,
-            use_hybrid=hybrid,
+            hybrid=hybrid,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"KB search failed: {e}")
 
@@ -442,8 +398,9 @@ def kb_search(
         q=q,
         limit=limit,
         hybrid=hybrid,
-        items=[KBSearchItem(**x) for x in items],
+        items=[KBSearchItemModel(**x) for x in items],
     )
+
 
 # -----------------------
 # V2.3 — KB (Q&A)
@@ -476,7 +433,7 @@ def kb_ask(
     return {
         "ok": True,
         "study_pack_id": study_pack_id,
-        "refused": res.refused,
+        "refused": bool(res.refused),
         "answer": res.answer,
         "model": res.model,
         "citations": [
@@ -488,7 +445,7 @@ def kb_ask(
                 "text": c.text,
                 "score": c.score,
             }
-            for c in res.citations
+            for c in (res.citations or [])
         ],
         "retrieval": res.retrieval,
     }
