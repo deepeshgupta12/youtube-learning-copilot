@@ -63,35 +63,35 @@ def kb_search_chunks(
     # distance = embedding <=> query_vec (cosine distance in pgvector)
     # lower distance is better.
     stmt = text(
-    """
-    SELECT
-      tce.chunk_id AS chunk_id,
-      tc.idx AS idx,
-      tc.start_sec AS start_sec,
-      tc.end_sec AS end_sec,
-      tc.text AS text,
-      (1.0 - (tce.embedding <=> :qvec)) AS score,
-      (tce.embedding <=> :qvec) AS distance
-    FROM transcript_chunk_embeddings tce
-    JOIN transcript_chunks tc ON tc.id = tce.chunk_id
-    WHERE tce.study_pack_id = :study_pack_id
-      AND tce.model = :model
-      AND tce.dim = :dim
-    ORDER BY tce.embedding <=> :qvec
-    LIMIT :k
-    """
+        """
+        SELECT
+          tce.chunk_id AS chunk_id,
+          tc.idx AS idx,
+          tc.start_sec AS start_sec,
+          tc.end_sec AS end_sec,
+          tc.text AS text,
+          (1.0 - (tce.embedding <=> :qvec)) AS score,
+          (tce.embedding <=> :qvec) AS distance
+        FROM transcript_chunk_embeddings tce
+        JOIN transcript_chunks tc ON tc.id = tce.chunk_id
+        WHERE tce.study_pack_id = :study_pack_id
+          AND tce.model = :model
+          AND tce.dim = :dim
+        ORDER BY tce.embedding <=> :qvec
+        LIMIT :k
+        """
     ).bindparams(
-        bindparam("qvec", type_=Vector(384))
+        bindparam("qvec", type_=Vector(dim))
     )
 
     sem_rows = db.execute(
         stmt,
         {
-            "qvec": q_vec,  # can be list[float] or numpy array
+            "qvec": q_vec,
             "study_pack_id": study_pack_id,
             "model": model,
-            "dim": 384,
-            "k": k,
+            "dim": dim,
+            "k": limit,
         },
     ).mappings().all()
 
