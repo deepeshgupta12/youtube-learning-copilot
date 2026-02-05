@@ -1,157 +1,152 @@
-# app/services/kb_search.py
+# apps/api/app/services/kb_search.py
 from __future__ import annotations
 
-import re
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
 
 from app.models.transcript_chunk import TranscriptChunk
-from app.models.transcript_chunk_embedding import TranscriptChunkEmbedding
 from app.services.embeddings import embed_texts
 
 
-def _tokens_for_hybrid(q: str) -> List[str]:
+@dataclass
+class KBSearchItem:
+    chunk_id: int
+    idx: int
+    start_sec: float
+    end_sec: float
+    text: str
+    score: float
+    distance: float
+
+
+def _safe_float(x: Any, default: float = 0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+
+def _to_pgvector_literal(vec: List[float]) -> str:
     """
-    Turn a query into useful keyword tokens.
-    Keep it simple + robust:
-    - lowercase
-    - alnum tokens
-    - drop very small tokens
-    - cap token count (avoid huge OR)
+    Convert list[float] -> pgvector literal string: "[0.1,0.2,...]".
+    This avoids psycopg sending it as double precision[] (array), which breaks <=>.
     """
-    q = (q or "").lower()
-    toks = re.findall(r"[a-z0-9]+", q)
-    toks = [t for t in toks if len(t) >= 3]
-    # dedupe preserving order
-    seen = set()
-    out = []
-    for t in toks:
-        if t in seen:
-            continue
-        seen.add(t)
-        out.append(t)
-    return out[:8]
+    return "[" + ",".join(f"{float(v):.8f}" for v in vec) + "]"
 
 
 def kb_search_chunks(
     db: Session,
     study_pack_id: int,
-    query: str,
-    model: str,
-    limit: int = 8,
-    use_hybrid: bool = True,
-) -> List[dict]:
+    *,
+    q: Optional[str] = None,
+    query: Optional[str] = None,  # backwards-compatible alias
+    limit: int = 5,
+    model: str = "sentence-transformers/all-MiniLM-L6-v2",
+    hybrid: bool = True,
+) -> List[Dict[str, Any]]:
     """
-    Returns top chunks for a query using pgvector cosine distance.
-    Hybrid = additionally filter candidates by keyword tokens.
+    V2.2 — Hybrid retrieval over transcript chunks.
+
+    Args:
+      q: query string (canonical)
+      query: alias for q (compat)
+      hybrid: if True, blend semantic + lexical; if False, semantic-only
     """
+    text_q = (q if q is not None else query) or ""
+    text_q = text_q.strip()
+    if not text_q:
+        return []
 
-    q = (query or "").strip()
-    if not q:
-        raise ValueError("Query is required")
+    # 1) Semantic search (pgvector)
+    q_vec = embed_texts([text_q], model_name=model, normalize=True)[0]
+    dim = len(q_vec)
+    qvec_literal = _to_pgvector_literal([float(x) for x in q_vec])
 
-    # 1) Ensure embeddings exist for this pack+model
-    exists = (
-        db.query(TranscriptChunkEmbedding.id)
-        .filter(
-            TranscriptChunkEmbedding.study_pack_id == study_pack_id,
-            TranscriptChunkEmbedding.model == model,
-        )
-        .limit(1)
-        .first()
-    )
-    if not exists:
-        raise RuntimeError(
-            f"No embeddings found for study_pack_id={study_pack_id} model={model}. "
-            f"Run POST /study-packs/{study_pack_id}/kb/embed first."
-        )
-
-    # 2) Embed the query (CPU-safe; you already stabilized embeddings.py)
-    qvec = embed_texts([q], model_name=model, normalize=True)[0]
-
-    # 3) Build SQL query
-    # cosine_distance: lower = more similar
-    dist = TranscriptChunkEmbedding.embedding.cosine_distance(qvec)
-
-    qry = (
-        db.query(
-            TranscriptChunkEmbedding.chunk_id.label("chunk_id"),
-            TranscriptChunk.idx.label("idx"),
-            TranscriptChunk.start_sec.label("start_sec"),
-            TranscriptChunk.end_sec.label("end_sec"),
-            TranscriptChunk.text.label("text"),
-            dist.label("distance"),
-        )
-        .join(TranscriptChunk, TranscriptChunk.id == TranscriptChunkEmbedding.chunk_id)
-        .filter(
-            TranscriptChunkEmbedding.study_pack_id == study_pack_id,
-            TranscriptChunkEmbedding.model == model,
-        )
+    # Important:
+    # - bind :qvec as TEXT and cast to ::vector in SQL
+    # - otherwise psycopg sends python list as double precision[] and pgvector <=> fails
+    stmt = text(
+        """
+        SELECT
+          tce.chunk_id AS chunk_id,
+          tc.idx AS idx,
+          tc.start_sec AS start_sec,
+          tc.end_sec AS end_sec,
+          tc.text AS text,
+          (1.0 - (tce.embedding <=> (:qvec)::vector)) AS score,
+          (tce.embedding <=> (:qvec)::vector) AS distance
+        FROM transcript_chunk_embeddings tce
+        JOIN transcript_chunks tc ON tc.id = tce.chunk_id
+        WHERE tce.study_pack_id = :study_pack_id
+          AND tce.model = :model
+          AND tce.dim = :dim
+        ORDER BY tce.embedding <=> (:qvec)::vector
+        LIMIT :k
+        """
+    ).bindparams(
+        bindparam("qvec"),
+        bindparam("study_pack_id"),
+        bindparam("model"),
+        bindparam("dim"),
+        bindparam("k"),
     )
 
-    # 4) Hybrid keyword filter (simple + fast)
-    if use_hybrid:
-        toks = _tokens_for_hybrid(q)
-        if toks:
-            ors = [TranscriptChunk.text.ilike(f"%{t}%") for t in toks]
-            qry = qry.filter(or_(*ors))
-
-    rows = qry.order_by(dist.asc()).limit(limit).all()
-
-    out = []
-    for r in rows:
-        distance = float(r.distance)
-        # cosine similarity ~= 1 - cosine_distance
-        score = 1.0 - distance
-        out.append(
+    sem_rows = (
+        db.execute(
+            stmt,
             {
-                "chunk_id": int(r.chunk_id),
-                "idx": int(r.idx),
-                "start_sec": float(r.start_sec),
-                "end_sec": float(r.end_sec),
-                "text": r.text,
-                "score": float(score),
-                "distance": float(distance),
+                "qvec": qvec_literal,
+                "study_pack_id": study_pack_id,
+                "model": model,
+                "dim": dim,
+                "k": int(limit),
+            },
+        )
+        .mappings()
+        .all()
+    )
+
+    sem_items: List[Dict[str, Any]] = []
+    for r in sem_rows:
+        sem_items.append(
+            {
+                "chunk_id": int(r["chunk_id"]),
+                "idx": int(r["idx"]),
+                "start_sec": _safe_float(r["start_sec"]),
+                "end_sec": _safe_float(r["end_sec"]),
+                "text": str(r["text"]),
+                "score": _safe_float(r["score"]),
+                "distance": _safe_float(r["distance"]),
             }
         )
 
-    # If hybrid got nothing, fallback to pure vector search
-    if use_hybrid and not out:
-        rows = (
-            db.query(
-                TranscriptChunkEmbedding.chunk_id.label("chunk_id"),
-                TranscriptChunk.idx.label("idx"),
-                TranscriptChunk.start_sec.label("start_sec"),
-                TranscriptChunk.end_sec.label("end_sec"),
-                TranscriptChunk.text.label("text"),
-                dist.label("distance"),
-            )
-            .join(TranscriptChunk, TranscriptChunk.id == TranscriptChunkEmbedding.chunk_id)
-            .filter(
-                TranscriptChunkEmbedding.study_pack_id == study_pack_id,
-                TranscriptChunkEmbedding.model == model,
-            )
-            .order_by(dist.asc())
-            .limit(limit)
-            .all()
-        )
+    if not hybrid:
+        return sem_items[:limit]
 
-        out = []
-        for r in rows:
-            distance = float(r.distance)
-            score = 1.0 - distance
-            out.append(
-                {
-                    "chunk_id": int(r.chunk_id),
-                    "idx": int(r.idx),
-                    "start_sec": float(r.start_sec),
-                    "end_sec": float(r.end_sec),
-                    "text": r.text,
-                    "score": float(score),
-                    "distance": float(distance),
-                }
-            )
+    # 2) Lexical boost (simple ILIKE, small candidate pool)
+    tokens = [
+        t
+        for t in text_q.lower().replace(":", " ").replace(",", " ").split()
+        if len(t) >= 3
+    ][:8]
+    if not tokens:
+        return sem_items[:limit]
 
-    return out
+    lex_query = db.query(TranscriptChunk).filter(
+        TranscriptChunk.study_pack_id == study_pack_id
+    )
+    for t in tokens:
+        lex_query = lex_query.filter(TranscriptChunk.text.ilike(f"%{t}%"))
+
+    lex_rows = lex_query.order_by(TranscriptChunk.idx.asc()).limit(limit * 3).all()
+    lex_ids = {int(x.id) for x in lex_rows}
+
+    for it in sem_items:
+        if int(it["chunk_id"]) in lex_ids:
+            it["score"] = float(it["score"]) + 0.08
+
+    sem_items.sort(key=lambda d: float(d["score"]), reverse=True)
+    return sem_items[:limit]
