@@ -10,7 +10,7 @@ from app.api.study_materials import router as study_materials_router
 from fastapi.middleware.cors import CORSMiddleware
 
 
-app = FastAPI(title="YouTube Learning Copilot API", version="0.0.1")
+app = FastAPI(title="YouTube Learning Copilot API", version="0.0.2")  # ✅ bumped
 app.include_router(jobs_router)
 app.include_router(study_packs_router)
 app.include_router(study_materials_router)

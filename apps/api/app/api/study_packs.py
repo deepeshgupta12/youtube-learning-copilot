@@ -1,4 +1,6 @@
 # apps/api/app/api/study_packs.py
+from __future__ import annotations
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -22,12 +24,41 @@ from app.worker.embedding_tasks import embed_transcript_chunks  # Celery task
 # V2.2 Retrieval service
 from app.services.kb_search import kb_search_chunks
 
-# V2.3 Q&A service
+# V2.3+ Q&A service
 from app.services.kb_qa import ask_grounded
 
 router = APIRouter(prefix="/study-packs", tags=["study_packs"])
 
 
+# -----------------------
+# Helpers
+# -----------------------
+def _with_timestamp(url: str, sec: float) -> str:
+    """
+    Returns a YouTube URL with a timestamp parameter.
+    Works for:
+      - ...watch?v=...&list=...
+      - ...watch?v=...
+    Uses 't=' in seconds.
+    """
+    base = (url or "").strip()
+    if not base:
+        return base
+    try:
+        t = int(max(0.0, float(sec)))
+    except Exception:
+        t = 0
+
+    sep = "&" if "?" in base else "?"
+    # avoid duplicate t=
+    if "t=" in base:
+        return base
+    return f"{base}{sep}t={t}"
+
+
+# -----------------------
+# V1 — Study Packs Library
+# -----------------------
 class StudyPackFromYoutubeRequest(BaseModel):
     url: str
     language: str | None = None
@@ -281,13 +312,19 @@ def list_transcript_chunks(
             }
         )
 
-    return {"ok": True, "study_pack_id": study_pack_id, "total": total, "limit": limit, "offset": offset, "items": items}
+    return {
+        "ok": True,
+        "study_pack_id": study_pack_id,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "items": items,
+    }
 
 
 # -----------------------
 # V2.1 — KB (Embeddings)
 # -----------------------
-
 class KBEmbedRequest(BaseModel):
     model: str | None = None
 
@@ -311,7 +348,6 @@ def kb_embed(
         raise HTTPException(status_code=404, detail="Study pack not found")
 
     model = (req.model if req else None)
-
     job = create_job(db, "kb_embed_transcript_chunks", {"study_pack_id": study_pack_id, "model": model})
     async_result = embed_transcript_chunks.delay(job.id, study_pack_id, model)
 
@@ -345,7 +381,6 @@ def kb_status(
 # -----------------------
 # V2.2 — KB (Retrieval)
 # -----------------------
-
 class KBSearchItemModel(BaseModel):
     chunk_id: int
     idx: int
@@ -383,7 +418,7 @@ def kb_search(
         items = kb_search_chunks(
             db=db,
             study_pack_id=study_pack_id,
-            q=q,                 # canonical
+            q=q,
             model=model,
             limit=limit,
             hybrid=hybrid,
@@ -403,12 +438,17 @@ def kb_search(
 
 
 # -----------------------
-# V2.3 — KB (Q&A)
+# V2.4 — KB (Q&A)
 # -----------------------
-
 class KBAskRequest(BaseModel):
     question: str
+
+    # LLM (Ollama) model
     model: str | None = None
+
+    # Retrieval embedding model (must match stored embeddings)
+    embed_model: str | None = None
+
     limit: int | None = 6
     hybrid: bool | None = True
     min_best_score: float | None = 0.52
@@ -420,23 +460,25 @@ def kb_ask(
     req: KBAskRequest,
     db: Session = Depends(get_db),
 ):
+    sp = db.query(StudyPack).filter(StudyPack.id == study_pack_id).first()
+    if not sp:
+        raise HTTPException(status_code=404, detail="Study pack not found")
+
     res = ask_grounded(
         db=db,
         study_pack_id=study_pack_id,
         question=req.question,
         model=req.model,
+        embed_model=req.embed_model,
         limit=int(req.limit or 6),
         hybrid=bool(req.hybrid if req.hybrid is not None else True),
         min_best_score=float(req.min_best_score or 0.52),
     )
 
-    return {
-        "ok": True,
-        "study_pack_id": study_pack_id,
-        "refused": bool(res.refused),
-        "answer": res.answer,
-        "model": res.model,
-        "citations": [
+    base_url = sp.source_url or ""
+    citations_out = []
+    for c in (res.citations or []):
+        citations_out.append(
             {
                 "chunk_id": c.chunk_id,
                 "idx": c.idx,
@@ -444,8 +486,25 @@ def kb_ask(
                 "end_sec": c.end_sec,
                 "text": c.text,
                 "score": c.score,
+                "url": _with_timestamp(base_url, c.start_sec),  # ✅ V2.4
             }
-            for c in (res.citations or [])
-        ],
+        )
+
+    return {
+        "ok": True,
+        "study_pack_id": study_pack_id,
+        "refused": bool(res.refused),
+        "answer": res.answer,
+        "model": res.model,
+        "embed_model": (req.embed_model or None),  # ✅ V2.4 (echo)
+        "study_pack": {  # ✅ V2.4 convenience payload for frontend
+            "id": sp.id,
+            "title": sp.title,
+            "source_url": sp.source_url,
+            "source_type": sp.source_type,
+            "playlist_id": sp.playlist_id,
+            "playlist_index": sp.playlist_index,
+        },
+        "citations": citations_out,
         "retrieval": res.retrieval,
     }
