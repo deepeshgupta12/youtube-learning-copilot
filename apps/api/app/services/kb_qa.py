@@ -1,196 +1,224 @@
+# apps/api/app/services/kb_qa.py
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
+import httpx
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.study_pack import StudyPack
 from app.services.kb_search import kb_search_chunks
-from app.services.ollama_client import OllamaClient
 
 
-@dataclass
-class Citation:
-    chunk_id: int
-    idx: int
-    start_sec: float
-    end_sec: float
-    text: str
-    score: float
-
-
-@dataclass
-class AskResult:
-    refused: bool
-    answer: str
-    citations: List[Citation]
-    model: str
-    retrieval: Dict[str, Any]
-
-
-def _build_context(citations: List[Citation], max_chars_per_chunk: int = 800) -> str:
+def _kb_search_chunks_compat(
+    db: Session,
+    study_pack_id: int,
+    *,
+    question: str,
+    limit: int,
+    model: str,
+    hybrid: bool,
+) -> List[Dict[str, Any]]:
     """
-    Build a context block that is easy for the LLM to cite.
-    We keep chunk text trimmed but still meaningful.
+    Compatibility wrapper so we never crash on param-name mismatch.
+
+    Tries:
+      kb_search_chunks(..., q=...)
+      kb_search_chunks(..., query=...)
+      kb_search_chunks(db, study_pack_id, question, ...)  (positional)
     """
-    lines: List[str] = []
-    for c in citations:
-        t = c.text.strip()
-        if len(t) > max_chars_per_chunk:
-            t = t[: max_chars_per_chunk].rstrip() + "…"
-        lines.append(
-            f"[chunk_id={c.chunk_id} idx={c.idx} time={c.start_sec:.3f}-{c.end_sec:.3f}]\n{t}\n"
+    # 1) Newer style: q=
+    try:
+        return kb_search_chunks(
+            db,
+            study_pack_id,
+            q=question,
+            limit=limit,
+            model=model,
+            hybrid=hybrid,
         )
-    return "\n".join(lines).strip()
+    except TypeError:
+        pass
 
+    # 2) Older style: query=
+    try:
+        return kb_search_chunks(
+            db,
+            study_pack_id,
+            query=question,
+            limit=limit,
+            model=model,
+            hybrid=hybrid,
+        )
+    except TypeError:
+        pass
 
-def _qa_system_prompt() -> str:
-    return (
-        "You are a strict study assistant.\n"
-        "You MUST answer using ONLY the provided transcript chunks.\n"
-        "If the chunks do not contain the answer, respond exactly with:\n"
-        "NOT_IN_VIDEO\n"
-        "Do not use outside knowledge.\n"
-        "Do not speculate.\n"
+    # 3) Positional fallback
+    return kb_search_chunks(
+        db,
+        study_pack_id,
+        question,
+        limit=limit,
+        model=model,
+        hybrid=hybrid,
     )
 
 
-def _qa_user_prompt(question: str, context: str) -> str:
-    return (
-        "Transcript chunks:\n"
-        f"{context}\n\n"
-        "User question:\n"
-        f"{question}\n\n"
-        "Rules:\n"
-        "1) Answer ONLY from transcript chunks.\n"
-        "2) If answer is not explicitly supported, output: NOT_IN_VIDEO\n"
-        "3) Keep answer concise and factual.\n"
-    )
+def _ollama_chat(
+    *,
+    prompt: str,
+    system: str,
+    model: Optional[str] = None,
+    temperature: float = 0.2,
+) -> str:
+    """
+    Minimal Ollama chat client (no dependency on your ollama_client.py impl).
+    Uses:
+      POST {OLLAMA_BASE_URL}/api/chat
+    """
+    base_url = getattr(settings, "ollama_base_url", "http://localhost:11434").rstrip("/")
+    model_name = model or getattr(settings, "ollama_model", "qwen2.5:7b-instruct")
 
+    url = f"{base_url}/api/chat"
+    payload = {
+        "model": model_name,
+        "stream": False,
+        "options": {"temperature": float(temperature)},
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+    }
 
-def _should_refuse(citations: List[Citation], min_best_score: float) -> bool:
-    if not citations:
-        return True
-    best = max(c.score for c in citations)
-    return best < min_best_score
+    with httpx.Client(timeout=120) as client:
+        r = client.post(url, json=payload)
+        r.raise_for_status()
+        data = r.json()
+
+    # Ollama returns {"message":{"role":"assistant","content":"..."}}
+    msg = (data or {}).get("message") or {}
+    return (msg.get("content") or "").strip()
 
 
 def ask_grounded(
     db: Session,
+    *,
     study_pack_id: int,
     question: str,
-    model: Optional[str] = None,
+    model: Optional[str] = None,  # <-- NEW: alias for embed_model (back-compat)
+    embed_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+    llm_model: Optional[str] = None,
     limit: int = 6,
     hybrid: bool = True,
-    min_best_score: float = 0.52,
-) -> AskResult:
+    min_score: float = 0.35,
+) -> Dict[str, Any]:
+    """
+    Grounded Q&A:
+    - retrieve chunks from KB
+    - if retrieval empty/weak -> refusal
+    - otherwise answer using Ollama, constrained to chunks
+    - return citations with timestamps
+    """
     question = (question or "").strip()
     if not question:
-        return AskResult(
-            refused=True,
-            answer="Not covered in this video.",
-            citations=[],
-            model=model or "",
-            retrieval={"reason": "empty_question"},
-        )
+        return {
+            "ok": True,
+            "study_pack_id": study_pack_id,
+            "question": question,
+            "answer": "",
+            "refusal": True,
+            "refusal_reason": "Empty question.",
+            "citations": [],
+            "used_chunks": [],
+        }
+    # Backward-compat: allow callers to pass model=...
+# Backward-compat: allow callers to pass model=...
+    if model:
+        embed_model = model
 
-    sp = db.query(StudyPack).filter(StudyPack.id == study_pack_id).first()
-    if not sp:
-        return AskResult(
-            refused=True,
-            answer="Not covered in this video.",
-            citations=[],
-            model=model or "",
-            retrieval={"reason": "study_pack_not_found"},
-        )
-
-    # Use default embedding model if none passed (same default used in kb_search)
-    embed_model = model or "sentence-transformers/all-MiniLM-L6-v2"
-
-    # Retrieve top chunks
-    items = kb_search_chunks(
-        db=db,
-        study_pack_id=study_pack_id,
-        q=question,
-        model=embed_model,
+    items = _kb_search_chunks_compat(
+        db,
+        study_pack_id,
+        question=question,
         limit=limit,
+        model=embed_model,
         hybrid=hybrid,
     )
 
-    citations: List[Citation] = []
-    for it in items:
+    if not items:
+        return {
+            "ok": True,
+            "study_pack_id": study_pack_id,
+            "question": question,
+            "answer": "Not in this video.",
+            "refusal": True,
+            "refusal_reason": "No relevant transcript chunks retrieved.",
+            "citations": [],
+            "used_chunks": [],
+        }
+
+    # Score gate (assumes kb_search returns `score` in [0..1] where higher is better)
+    best_score = float(items[0].get("score") or 0.0)
+    if best_score < float(min_score):
+        return {
+            "ok": True,
+            "study_pack_id": study_pack_id,
+            "question": question,
+            "answer": "Not in this video.",
+            "refusal": True,
+            "refusal_reason": f"Low retrieval confidence (best_score={best_score:.3f} < {min_score:.3f}).",
+            "citations": [],
+            "used_chunks": items,
+        }
+
+    # Build context with explicit citations
+    context_lines: List[str] = []
+    citations: List[Dict[str, Any]] = []
+    for i, it in enumerate(items, start=1):
+        chunk_id = int(it["chunk_id"])
+        start_sec = float(it.get("start_sec") or 0.0)
+        end_sec = float(it.get("end_sec") or 0.0)
+        text = (it.get("text") or "").strip()
+
+        tag = f"[C{i}]"
+        context_lines.append(
+            f"{tag} chunk_id={chunk_id} time={start_sec:.3f}-{end_sec:.3f}\n{text}"
+        )
         citations.append(
-            Citation(
-                chunk_id=int(it["chunk_id"]),
-                idx=int(it["idx"]),
-                start_sec=float(it["start_sec"]),
-                end_sec=float(it["end_sec"]),
-                text=str(it["text"] or ""),
-                score=float(it.get("score") or 0.0),
-            )
+            {
+                "ref": tag,
+                "chunk_id": chunk_id,
+                "start_sec": start_sec,
+                "end_sec": end_sec,
+            }
         )
 
-    # Early refusal if retrieval too weak
-    if _should_refuse(citations, min_best_score=min_best_score):
-        return AskResult(
-            refused=True,
-            answer="Not covered in this video.",
-            citations=[],
-            model=embed_model,
-            retrieval={
-                "hybrid": hybrid,
-                "limit": limit,
-                "min_best_score": min_best_score,
-                "best_score": max((c.score for c in citations), default=0.0),
-                "retrieved": len(citations),
-            },
-        )
-
-    context = _build_context(citations)
-
-    # Call Ollama
-    base_url = getattr(settings, "ollama_base_url", None) or "http://localhost:11434"
-    llm_model = getattr(settings, "ollama_model", None) or "qwen2.5:7b-instruct"
-    client = OllamaClient(base_url=base_url, timeout_s=180.0)
-
-    sys_prompt = _qa_system_prompt()
-    user_prompt = _qa_user_prompt(question, context)
-
-    out = client.generate(model=llm_model, prompt=user_prompt, system=sys_prompt, temperature=0.2)
-    text = (out.text or "").strip()
-
-    if not text:
-        return AskResult(
-            refused=True,
-            answer="Not covered in this video.",
-            citations=[],
-            model=embed_model,
-            retrieval={"reason": "empty_llm_output"},
-        )
-
-    if "NOT_IN_VIDEO" in text:
-        return AskResult(
-            refused=True,
-            answer="Not covered in this video.",
-            citations=[],
-            model=embed_model,
-            retrieval={"reason": "llm_refused"},
-        )
-
-    # Success: return answer + citations
-    return AskResult(
-        refused=False,
-        answer=text,
-        citations=citations,
-        model=embed_model,
-        retrieval={
-            "hybrid": hybrid,
-            "limit": limit,
-            "min_best_score": min_best_score,
-            "best_score": max((c.score for c in citations), default=0.0),
-            "retrieved": len(citations),
-        },
+    system = (
+        "You are a strict study assistant.\n"
+        "You MUST answer using ONLY the provided transcript chunks.\n"
+        "If the answer is not present in the chunks, reply exactly: Not in this video.\n"
+        "When you use facts, add citations like [C1], [C2] corresponding to the chunks.\n"
+        "Do not invent citations.\n"
     )
+
+    prompt = (
+        f"Question:\n{question}\n\n"
+        f"Transcript chunks:\n\n" + "\n\n".join(context_lines) + "\n\n"
+        "Answer (with citations):"
+    )
+
+    answer = _ollama_chat(prompt=prompt, system=system, model=llm_model, temperature=0.2)
+
+    refusal = answer.strip().lower() == "not in this video."
+    used = [] if refusal else citations
+
+    return {
+        "ok": True,
+        "study_pack_id": study_pack_id,
+        "question": question,
+        "answer": answer,
+        "refusal": refusal,
+        "refusal_reason": None if not refusal else "Model indicated answer not supported by retrieved chunks.",
+        "citations": used,
+        "used_chunks": items,
+    }
