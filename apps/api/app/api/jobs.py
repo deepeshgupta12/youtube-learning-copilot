@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -41,6 +41,9 @@ class JobGetResponse(BaseModel):
 @router.get("/{job_id}", response_model=JobGetResponse)
 def get_job(job_id: int, db: Session = Depends(get_db)) -> JobGetResponse:
     job = db.query(Job).filter(Job.id == job_id).one()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
     return JobGetResponse(
         ok=True,
         job_id=job.id,
