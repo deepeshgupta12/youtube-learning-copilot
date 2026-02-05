@@ -61,8 +61,8 @@ def _ollama_generate(*, base_url: str, model: str, prompt: str) -> str:
         "prompt": prompt,
         "stream": False,
         "options": {
-            "num_predict": num_predict,   # hard cap output tokens
-            "temperature": temperature,   # keep it stable
+            "num_predict": num_predict,
+            "temperature": temperature,
         },
     }
 
@@ -79,21 +79,28 @@ def ask_grounded(
     db: Session,
     study_pack_id: int,
     question: str,
-    model: Optional[str] = None,
+    model: Optional[str] = None,          # LLM model
+    embed_model: Optional[str] = None,    # ✅ V2.4 retrieval model
     limit: int = 6,
     hybrid: bool = True,
     min_best_score: float = 0.52,
 ) -> KBAskResult:
     """
-    V2.3 — Grounded Q&A over transcript chunks (pgvector retrieval + Ollama).
+    V2.4 — Grounded Q&A over transcript chunks.
 
-    - Retrieves top chunks using kb_search_chunks(query=question)
-    - Refuses if evidence is missing / best_score below threshold
+    - Retrieves chunks using kb_search_chunks(query=question, model=embed_model)
+    - Refuses if evidence missing / best_score below threshold
     - Answer must cite sources like [1], [2] ...
     """
     q = _normalize_question(question)
     llm_model = model or getattr(settings, "ollama_model", "qwen2.5:7b-instruct")
     base_url = getattr(settings, "ollama_base_url", "http://localhost:11434")
+
+    retrieval_model = embed_model or getattr(
+        settings,
+        "kb_default_embed_model",
+        "sentence-transformers/all-MiniLM-L6-v2",
+    )
 
     if not q:
         return KBAskResult(
@@ -103,10 +110,13 @@ def ask_grounded(
             citations=[],
             retrieval={
                 "study_pack_id": study_pack_id,
+                "query": q,
                 "limit": int(limit),
                 "hybrid": bool(hybrid),
                 "min_best_score": float(min_best_score),
                 "best_score": None,
+                "embed_model": retrieval_model,
+                "llm_model": llm_model,
                 "reason": "empty_question",
             },
         )
@@ -117,9 +127,9 @@ def ask_grounded(
     items = kb_search_chunks(
         db=db,
         study_pack_id=study_pack_id,
-        query=q,  # alias supported by kb_search_chunks
+        query=q,
         limit=retrieval_k,
-        model="sentence-transformers/all-MiniLM-L6-v2",
+        model=retrieval_model,
         hybrid=bool(hybrid),
     )
 
@@ -142,11 +152,12 @@ def ask_grounded(
                 "min_best_score": float(min_best_score),
                 "best_score": float(best_score),
                 "retrieved": len(items),
+                "embed_model": retrieval_model,
+                "llm_model": llm_model,
                 "reason": "insufficient_evidence",
             },
         )
 
-    # Build citations (top_k only)
     citations: List[KBCitation] = []
     for it in items[:top_k]:
         citations.append(
@@ -160,7 +171,6 @@ def ask_grounded(
             )
         )
 
-    # Keep prompt small to avoid slow generations/timeouts
     max_chars_per_chunk = int(os.getenv("KB_QA_MAX_CHARS_PER_CHUNK", "700"))
 
     ctx_lines: List[str] = []
@@ -190,7 +200,6 @@ Answer (with citations):
     try:
         answer = _ollama_generate(base_url=base_url, model=llm_model, prompt=prompt)
     except Exception as e:
-        # Fail safe: we still return citations + retrieval context
         return KBAskResult(
             refused=True,
             answer=f"I couldn’t generate an answer due to an LLM error: {e}",
@@ -205,6 +214,8 @@ Answer (with citations):
                 "best_score": float(best_score),
                 "retrieved": len(items),
                 "used": len(citations),
+                "embed_model": retrieval_model,
+                "llm_model": llm_model,
                 "reason": "ollama_error",
             },
         )
@@ -223,5 +234,7 @@ Answer (with citations):
             "best_score": float(best_score),
             "retrieved": len(items),
             "used": len(citations),
+            "embed_model": retrieval_model,
+            "llm_model": llm_model,
         },
     )
