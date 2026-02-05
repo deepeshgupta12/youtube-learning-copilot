@@ -18,6 +18,7 @@ from app.services.youtube import (
 )
 from app.worker.ingest_tasks import ingest_youtube_captions, ingest_youtube_playlist
 from app.worker.embedding_tasks import embed_transcript_chunks  # Celery task
+from app.services.kb_qa import ask_grounded
 
 # ✅ V2.2 Retrieval service
 from app.services.kb_search import kb_search_chunks
@@ -443,3 +444,51 @@ def kb_search(
         hybrid=hybrid,
         items=[KBSearchItem(**x) for x in items],
     )
+
+# -----------------------
+# V2.3 — KB (Q&A)
+# -----------------------
+
+class KBAskRequest(BaseModel):
+    question: str
+    model: str | None = None
+    limit: int | None = 6
+    hybrid: bool | None = True
+    min_best_score: float | None = 0.52
+
+
+@router.post("/{study_pack_id}/kb/ask")
+def kb_ask(
+    study_pack_id: int,
+    req: KBAskRequest,
+    db: Session = Depends(get_db),
+):
+    res = ask_grounded(
+        db=db,
+        study_pack_id=study_pack_id,
+        question=req.question,
+        model=req.model,
+        limit=int(req.limit or 6),
+        hybrid=bool(req.hybrid if req.hybrid is not None else True),
+        min_best_score=float(req.min_best_score or 0.52),
+    )
+
+    return {
+        "ok": True,
+        "study_pack_id": study_pack_id,
+        "refused": res.refused,
+        "answer": res.answer,
+        "model": res.model,
+        "citations": [
+            {
+                "chunk_id": c.chunk_id,
+                "idx": c.idx,
+                "start_sec": c.start_sec,
+                "end_sec": c.end_sec,
+                "text": c.text,
+                "score": c.score,
+            }
+            for c in res.citations
+        ],
+        "retrieval": res.retrieval,
+    }
